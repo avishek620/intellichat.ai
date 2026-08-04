@@ -12,7 +12,11 @@ import {
   Copy,
   Check,
   Download,
+  Clock,
 } from "lucide-react";
+
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface Message {
   role: "user" | "assistant";
@@ -25,6 +29,56 @@ interface Conversation {
   title: string;
   messages: Message[];
   timestamp: number;
+}
+
+function MessageContent({ content }: { content: string }) {
+  return (
+    <div className="prose prose-invert prose-sm max-w-none">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          table: ({ children }) => (
+            <div className="overflow-x-auto my-3">
+              <table className="border-collapse w-full text-sm">{children}</table>
+            </div>
+          ),
+          th: ({ children }) => (
+            <th className="border border-slate-600 bg-slate-700 px-3 py-2 text-left font-semibold">
+              {children}
+            </th>
+          ),
+          td: ({ children }) => (
+            <td className="border border-slate-600 px-3 py-2">{children}</td>
+          ),
+          code: ({ className, children, ...props }: any) => {
+            const isInline = !className;
+            if (isInline) {
+              return (
+                <code className="bg-slate-700 px-1.5 py-0.5 rounded text-sm" {...props}>
+                  {children}
+                </code>
+              );
+            }
+            return (
+              <pre className="bg-slate-950 border border-slate-700 rounded-lg p-4 overflow-x-auto my-3">
+                <code className={className} {...props}>
+                  {children}
+                </code>
+              </pre>
+            );
+          },
+          p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+          ul: ({ children }) => <ul className="list-disc pl-5 mb-2 space-y-1">{children}</ul>,
+          ol: ({ children }) => <ol className="list-decimal pl-5 mb-2 space-y-1">{children}</ol>,
+          h1: ({ children }) => <h1 className="text-lg font-bold mt-3 mb-2">{children}</h1>,
+          h2: ({ children }) => <h2 className="text-base font-bold mt-3 mb-2">{children}</h2>,
+          h3: ({ children }) => <h3 className="text-sm font-bold mt-2 mb-1">{children}</h3>,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
 }
 
 export default function Home() {
@@ -49,6 +103,30 @@ export default function Home() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
 
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [nameSubmitted, setNameSubmitted] = useState(false);
+  const [trialStartTime, setTrialStartTime] = useState<number | null>(null);
+  const [remainingMs, setRemainingMs] = useState<number | null>(null);
+  const [unlocked, setUnlocked] = useState(false);
+  const [showGoodwillGate, setShowGoodwillGate] = useState(false);
+  const [goodwillCode, setGoodwillCode] = useState("");
+  const [codeError, setCodeError] = useState("");
+  const [checkingCode, setCheckingCode] = useState(false);
+
+  const TRIAL_DURATION_MS = 10 * 60 * 1000;
+
+  const [sessionAccessStart, setSessionAccessStart] = useState<number | null>(null);
+  const [elapsedSessionMs, setElapsedSessionMs] = useState(0);
+  const [totalInputTokens, setTotalInputTokens] = useState(0);
+  const [totalOutputTokens, setTotalOutputTokens] = useState(0);
+
+  const USD_TO_INR = 100;
+  const INPUT_COST_PER_1K_TOKENS_USD = 0.0025;
+  const OUTPUT_COST_PER_1K_TOKENS_USD = 0.015;
+  const INPUT_COST_PER_1K_TOKENS = INPUT_COST_PER_1K_TOKENS_USD * USD_TO_INR;
+  const OUTPUT_COST_PER_1K_TOKENS = OUTPUT_COST_PER_1K_TOKENS_USD * USD_TO_INR;
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -70,6 +148,147 @@ export default function Home() {
       }
     }
   }, []);
+
+
+  useEffect(() => {
+    const savedFirst = localStorage.getItem("intellichat-first-name");
+    const savedLast = localStorage.getItem("intellichat-last-name");
+    const savedUnlocked = sessionStorage.getItem("intellichat-unlocked");
+    const savedAccessStart = sessionStorage.getItem("intellichat-session-access-start");
+    const savedInputTokens = sessionStorage.getItem("intellichat-input-tokens");
+    const savedOutputTokens = sessionStorage.getItem("intellichat-output-tokens");
+
+    if (savedFirst && savedLast) {
+      setFirstName(savedFirst);
+      setLastName(savedLast);
+      setNameSubmitted(true);
+    }
+
+    if (savedUnlocked === "true" && savedAccessStart) {
+      setUnlocked(true);
+      setSessionAccessStart(parseInt(savedAccessStart));
+    }
+
+    if (savedInputTokens) {
+      setTotalInputTokens(parseInt(savedInputTokens));
+    }
+
+    if (savedOutputTokens) {
+      setTotalOutputTokens(parseInt(savedOutputTokens));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!nameSubmitted || unlocked) return;
+
+    async function startOrResumeTrial() {
+      try {
+        const res = await fetch("/api/start-trial", { method: "POST" });
+        const data = await res.json();
+        setTrialStartTime(data.startTime);
+      } catch (err) {
+        console.error("Failed to start trial:", err);
+      }
+    }
+
+    startOrResumeTrial();
+  }, [nameSubmitted, unlocked]);
+
+  useEffect(() => {
+    if (!trialStartTime || unlocked) return;
+
+    function tick() {
+      const elapsed = Date.now() - trialStartTime!;
+      const remaining = TRIAL_DURATION_MS - elapsed;
+
+      if (remaining <= 0) {
+        setRemainingMs(0);
+        setShowGoodwillGate(true);
+      } else {
+        setRemainingMs(remaining);
+        setShowGoodwillGate(false);
+      }
+    }
+
+    tick();
+    const interval = setInterval(tick, 1000);
+
+    return () => clearInterval(interval);
+  }, [trialStartTime, unlocked]);
+
+  useEffect(() => {
+    if (!unlocked || !sessionAccessStart) return;
+
+    function tick() {
+      setElapsedSessionMs(Date.now() - sessionAccessStart!);
+    }
+
+    tick();
+    const interval = setInterval(tick, 1000);
+
+    return () => clearInterval(interval);
+  }, [unlocked, sessionAccessStart]);
+
+
+function formatTime(ms: number) {
+    const totalSeconds = Math.ceil(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+  }
+
+  function formatElapsed(ms: number) {
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+    }
+    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+  }
+
+  function handleNameSubmit() {
+    if (!firstName.trim() || !lastName.trim()) return;
+
+    localStorage.setItem("intellichat-first-name", firstName.trim());
+    localStorage.setItem("intellichat-last-name", lastName.trim());
+
+    setNameSubmitted(true);
+  }
+
+  async function handleCodeSubmit() {
+    setCheckingCode(true);
+    setCodeError("");
+
+    try {
+      const res = await fetch("/api/verify-code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: goodwillCode }),
+      });
+
+      const data = await res.json();
+
+      if (data.valid) {
+        const accessStart = Date.now();
+        sessionStorage.setItem("intellichat-unlocked", "true");
+        sessionStorage.setItem("intellichat-session-access-start", accessStart.toString());
+        setSessionAccessStart(accessStart);
+        setUnlocked(true);
+        setShowGoodwillGate(false);
+        setGoodwillCode("");
+      } else {
+        setCodeError("Invalid code. Please try again.");
+      }
+    } catch (err) {
+      setCodeError("Something went wrong. Please try again.");
+    }
+
+    setCheckingCode(false);
+  }
+
+
 
   function saveCurrentConversation() {
     const realMessages = messages.filter((m, i) => !(i === 0 && m.role === "assistant"));
@@ -122,22 +341,6 @@ export default function Home() {
     }
   }
 
-  async function handleLogout() {
-    alert("You have been logged out. Click OK to log back in.");
-
-    try {
-      await fetch("/api/chat", {
-        headers: {
-          Authorization: "Basic " + btoa("logout:logout"),
-        },
-      });
-    } catch (err) {
-      // expected to fail with 401 — that's the point
-    }
-
-    window.location.reload();
-  }
-
   async function sendMessage() {
     if (!prompt.trim()) return;
 
@@ -167,6 +370,9 @@ formData.append(
 formData.append("documentText", documentText);
 formData.append("fileName", uploadedFileNames.join(", "));
 
+formData.append("firstName", firstName);
+formData.append("lastName", lastName);
+
 currentImages.forEach((img) => {
   formData.append("images", img);
 });
@@ -194,6 +400,20 @@ const res = await fetch("/api/chat", {
           responseTime: parseFloat(elapsedSeconds),
         },
       ]);
+
+      if (data.usage) {
+        setTotalInputTokens((prev) => {
+          const updated = prev + (data.usage.promptTokens || 0);
+          sessionStorage.setItem("intellichat-input-tokens", updated.toString());
+          return updated;
+        });
+
+        setTotalOutputTokens((prev) => {
+          const updated = prev + (data.usage.completionTokens || 0);
+          sessionStorage.setItem("intellichat-output-tokens", updated.toString());
+          return updated;
+        });
+      }
 
       // setUploadedFileNames([]);
       // setDocumentText("");
@@ -304,6 +524,74 @@ function downloadResponse(text: string, index: number) {
   return (
     <div className="flex h-screen bg-slate-950 text-white">
 
+    {!nameSubmitted && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-8 w-full max-w-md">
+            <h2 className="text-xl font-bold mb-2">Welcome to IntelliChat</h2>
+            <p className="text-slate-400 text-sm mb-6">
+              Please tell us your name to get started.
+            </p>
+
+            <input
+              type="text"
+              placeholder="First name"
+              value={firstName}
+              onChange={(e) => setFirstName(e.target.value)}
+              className="w-full mb-3 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:border-blue-600"
+            />
+
+            <input
+              type="text"
+              placeholder="Last name"
+              value={lastName}
+              onChange={(e) => setLastName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleNameSubmit()}
+              className="w-full mb-4 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:border-blue-600"
+            />
+
+            <button
+              onClick={handleNameSubmit}
+              disabled={!firstName.trim() || !lastName.trim()}
+              className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 rounded-xl py-3 font-medium transition"
+            >
+              Start Chatting
+            </button>
+          </div>
+        </div>
+      )}
+
+      {nameSubmitted && showGoodwillGate && !unlocked && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-8 w-full max-w-md">
+            <h2 className="text-xl font-bold mb-2">Your free trial has ended</h2>
+            <p className="text-slate-400 text-sm mb-6">
+              Enter your goodwill code to continue. Your conversation is safe and will resume exactly where you left off.
+            </p>
+
+            <input
+              type="text"
+              placeholder="Goodwill code"
+              value={goodwillCode}
+              onChange={(e) => setGoodwillCode(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleCodeSubmit()}
+              className="w-full mb-2 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:border-blue-600"
+            />
+
+            {codeError && (
+              <p className="text-red-400 text-sm mb-3">{codeError}</p>
+            )}
+
+            <button
+              onClick={handleCodeSubmit}
+              disabled={!goodwillCode.trim() || checkingCode}
+              className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 rounded-xl py-3 font-medium transition"
+            >
+              {checkingCode ? "Checking..." : "Unlock"}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Sidebar */}
 
       <aside
@@ -397,14 +685,20 @@ function downloadResponse(text: string, index: number) {
 
         </div>
 
-<div className="p-4 border-t border-slate-800">
-          <button
-            onClick={handleLogout}
-            className="w-full rounded-xl bg-slate-800 hover:bg-red-600 py-3 flex items-center justify-center gap-2 transition"
-          >
-            {sidebarOpen ? "Logout" : "⏻"}
-          </button>
-        </div>
+        {sidebarOpen && unlocked && (
+          <div className="p-4 border-t border-slate-800 text-xs text-slate-400 space-y-1">
+            <p className="text-slate-500 uppercase text-[10px] mb-2">Session Usage</p>
+            <p>Input tokens: {totalInputTokens.toLocaleString()}</p>
+            <p>Output tokens: {totalOutputTokens.toLocaleString()}</p>
+            <p>
+              Est. cost: ₹
+              {(
+                (totalInputTokens / 1000) * INPUT_COST_PER_1K_TOKENS +
+                (totalOutputTokens / 1000) * OUTPUT_COST_PER_1K_TOKENS
+              ).toFixed(2)}
+            </p>
+          </div>
+        )}
 
       </aside>
 
@@ -414,7 +708,7 @@ function downloadResponse(text: string, index: number) {
 
         {/* Header */}
 
-        <header className="border-b border-slate-800 px-8 py-5 flex items-center justify-between">
+  <header className="border-b border-slate-800 px-8 py-5 flex items-center justify-between">
 
           <div>
 
@@ -431,6 +725,26 @@ function downloadResponse(text: string, index: number) {
   </p>
 
           </div>
+
+          {nameSubmitted && !unlocked && remainingMs !== null && (
+            <div
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border ${
+                remainingMs <= 60000
+                  ? "bg-red-600/20 text-red-400 border-red-600/40"
+                  : "bg-slate-800 text-slate-300 border-slate-700"
+              }`}
+            >
+              <Clock size={16} />
+              {formatTime(remainingMs)} remaining
+            </div>
+          )}
+
+          {nameSubmitted && unlocked && (
+            <div className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border bg-slate-800 text-slate-300 border-slate-700">
+              <Clock size={16} />
+              {formatElapsed(elapsedSessionMs)} session time
+            </div>
+          )}
 
         </header>
 
@@ -458,12 +772,12 @@ function downloadResponse(text: string, index: number) {
                 )}
 
    <div
-  className={`relative max-w-3xl rounded-2xl px-5 py-4 whitespace-pre-wrap ${
+  className={`relative max-w-3xl rounded-2xl px-5 py-4 ${
     msg.role === "assistant"
       ? "bg-slate-800 pt-10"
-      : "bg-blue-600"
+      : "bg-blue-600 whitespace-pre-wrap"
   }`}
->             
+>          
 
   {msg.role === "assistant" && (
 
@@ -493,7 +807,7 @@ function downloadResponse(text: string, index: number) {
 
   )}
 
-  {msg.content}
+  <MessageContent content={msg.content} />
 
   {msg.role === "assistant" && msg.responseTime !== undefined && (
     <div className="text-xs text-slate-500 mt-3">

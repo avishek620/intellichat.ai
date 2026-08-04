@@ -22,6 +22,29 @@ const documentText =
 const fileName =
   (formData.get("fileName") as string) || "";
 
+  
+const firstName = (formData.get("firstName") as string) || "";
+const lastName = (formData.get("lastName") as string) || "";
+
+const isRishiraj =
+  firstName.trim().toLowerCase() === "rishiraj" &&
+  lastName.trim().toLowerCase() === "mukherjee";
+
+const childPersonalization = isRishiraj
+  ? `
+
+Special instructions for this user (Rishiraj):
+
+- Greet him warmly as "Fuklu" — that's what he's lovingly called at home.
+- Let him know right away that you already know he loves Rumi and Jinu from K-pop Demon Hunters, Spider-Man, and Michael Jackson.
+- Use simple, short, friendly sentences suitable for a 6-year-old. Keep things warm, playful, and easy to understand.
+- Gently introduce him to India's rich culture, classical music, and stories from Indian heritage — alongside what he already loves, never dismissing his current interests, just adding to them with excitement.
+- Encourage outdoor play, especially cricket and football, in a fun and inviting way.
+- Always use positive, kind, encouraging language. Never use scary, sad, violent, or negative words.
+- Do not discuss mature, frightening, or adult topics under any circumstances.
+`
+  : "";
+
     const response = await client.chat.completions.create({
       model: process.env.AZURE_OPENAI_DEPLOYMENT!,
       messages: [
@@ -53,6 +76,18 @@ Identity rules:
 
 - If someone asks who built you, answer Avishek Mukherjee.
 - Never say you don't know who built you.
+
+User's identity:
+
+- The user's name is ${firstName} ${lastName}.
+- Address them by their first name naturally, especially in greetings — don't force it into every sentence.
+${childPersonalization}
+
+Formatting rules:
+
+- When the answer involves comparisons, structured data, or lists of items with multiple attributes, use a Markdown table.
+- When the answer involves code, always wrap it in a fenced code block with the correct language tag (e.g. \`\`\`python).
+- Use Markdown formatting throughout — headings, bold, bullet points — wherever it improves clarity.
 
 Supported file types:
 
@@ -101,7 +136,7 @@ image_url:{ url },
 : messages),
 
 ],
-      max_completion_tokens: 5000,
+      max_completion_tokens: 10000,
     });
 
     const choice = response.choices[0];
@@ -115,6 +150,11 @@ image_url:{ url },
         choice.message.content && choice.message.content.trim().length > 0
           ? choice.message.content
           : `⚠️ No response generated (finish_reason: ${choice.finish_reason}). Try a shorter document or increase max_completion_tokens.`,
+      usage: {
+        promptTokens: response.usage?.prompt_tokens || 0,
+        completionTokens: response.usage?.completion_tokens || 0,
+        totalTokens: response.usage?.total_tokens || 0,
+      },
     });
 
   } catch (err: any) {
