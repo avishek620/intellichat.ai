@@ -100,6 +100,10 @@ export default function Home() {
 
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
 
+  const [conversationSaved, setConversationSaved] = useState(false);
+
+  const [responseMode, setResponseMode] = useState<"smart" | "deep">("smart");
+
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
 
@@ -323,6 +327,13 @@ function formatTime(ms: number) {
     });
   }
 
+
+  function handleManualSave() {
+    saveCurrentConversation();
+    setConversationSaved(true);
+    setTimeout(() => setConversationSaved(false), 2000);
+  }
+
   function loadConversation(conv: Conversation) {
     saveCurrentConversation();
     setMessages(conv.messages);
@@ -372,6 +383,8 @@ formData.append("fileName", uploadedFileNames.join(", "));
 
 formData.append("firstName", firstName);
 formData.append("lastName", lastName);
+
+formData.append("responseMode", responseMode);
 
 currentImages.forEach((img) => {
   formData.append("images", img);
@@ -716,12 +729,12 @@ function downloadResponse(text: string, index: number) {
               IntelliChat.ai
             </h2>
 
-             <p className="text-slate-400 text-sm">
-    Built for Professionals
+<p className="text-slate-400 text-sm">
+    Built for Professionals and Students
   </p>
 
-  <p className="text-slate-500 text-xs mt-1">
-    © 2026 Avishek Mukherjee. All Rights Reserved.
+<p className="text-slate-500 text-xs mt-1">
+    **This SLM does not generate image or video - it is not built for that
   </p>
 
           </div>
@@ -775,9 +788,9 @@ function downloadResponse(text: string, index: number) {
   className={`relative max-w-3xl rounded-2xl px-5 py-4 ${
     msg.role === "assistant"
       ? "bg-slate-800 pt-10"
-      : "bg-blue-600 whitespace-pre-wrap"
+      : "bg-blue-600 pt-10 whitespace-pre-wrap"
   }`}
->          
+>             
 
   {msg.role === "assistant" && (
 
@@ -785,6 +798,22 @@ function downloadResponse(text: string, index: number) {
       onClick={() => copyResponse(msg.content, index)}
       className="absolute top-3 right-10 text-slate-400 hover:text-white transition"
       title="Copy response"
+    >
+      {copiedIndex === index ? (
+        <Check size={16} />
+      ) : (
+        <Copy size={16} />
+      )}
+    </button>
+
+  )}
+
+  {msg.role === "user" && (
+
+    <button
+      onClick={() => copyResponse(msg.content, index)}
+      className="absolute top-3 right-3 text-blue-200 hover:text-white transition"
+      title="Copy message"
     >
       {copiedIndex === index ? (
         <Check size={16} />
@@ -1084,9 +1113,41 @@ function downloadResponse(text: string, index: number) {
 
             </div>
 
-            <p className="text-center text-xs text-slate-500 mt-3">
-              IntelliChat can make mistakes. Verify important information.
-            </p>
+            <div className="flex items-center justify-center gap-3 mt-3">
+              <button
+                onClick={handleManualSave}
+                className="text-xs text-slate-400 hover:text-white transition flex items-center gap-1"
+              >
+                {conversationSaved ? (
+                  <>
+                    <Check size={12} />
+                    Saved!
+                  </>
+                ) : (
+                  "💾 Save Conversation"
+                )}
+              </button>
+
+              <select
+                value={responseMode}
+                onChange={(e) => setResponseMode(e.target.value as "smart" | "deep")}
+                className="text-xs bg-slate-800 text-slate-300 border border-slate-700 rounded-lg px-2 py-1 outline-none hover:border-slate-600 transition cursor-pointer"
+              >
+                <option value="smart">💬 Smart Conversation</option>
+                <option value="deep">🔬 Deep Research</option>
+              </select>
+
+          
+            </div>
+
+<div className="flex items-center justify-between text-xs text-slate-500 mt-2">
+              <span className="flex-1 text-center">
+                IntelliChat can make mistakes. Verify important information.
+              </span>
+              <span className="ml-4 whitespace-nowrap">
+                © 2026 Avishek Mukherjee. All Rights Reserved.
+              </span>
+            </div>
 
           </div>
 
