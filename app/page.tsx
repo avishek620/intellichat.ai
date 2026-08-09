@@ -532,7 +532,33 @@ function downloadResponse(text: string, index: number) {
   URL.revokeObjectURL(url);
 }
 
+function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
 
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+
+        const file = item.getAsFile();
+        if (!file) continue;
+
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const pastedFileName = `pasted-screenshot-${timestamp}.png`;
+
+        setUploadedFileNames((prev) => [...prev, pastedFileName]);
+        setUploadedFiles((prev) => [...prev, file]);
+
+        const reader = new FileReader();
+        reader.onload = () => {
+          setUploadedImages((prev) => [...prev, reader.result as string]);
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+  }
 
   return (
     <div className="flex h-screen bg-slate-950 text-white">
@@ -1094,6 +1120,7 @@ function downloadResponse(text: string, index: number) {
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
                 onKeyDown={onKeyDown}
+                onPaste={handlePaste}
                 rows={1}
                 placeholder={
   uploadedFileNames.length > 0
