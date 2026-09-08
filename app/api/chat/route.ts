@@ -43,13 +43,15 @@ export async function POST(req: Request) {
         messages: [
           {
             role: "system",
-            content: `Look at this conversation and decide if the user's LATEST message is asking about current weather, temperature, or conditions at some location — including short follow-ups like "what about X", a bare place name reply to a clarifying question, or "how about now".
+            content: `Look at this conversation and decide if the user's LATEST message is asking about (a) current weather/temperature/conditions somewhere, or (b) their own current location/city/where they are right now — including short follow-ups like "what about X", a bare place name reply to a clarifying question, or "how about now".
 
 Respond with ONLY valid JSON, no markdown, no commentary:
-{ "isWeatherQuery": true or false, "location": "string or null" }
+{ "needsLocationLookup": true or false, "wantsWeather": true or false, "location": "string or null" }
 
-- "location": the specific place being asked about, resolved from context if needed (e.g. if the user just replied "Dallas" to a clarifying question about which Texas city, location is "Dallas"). Use null if no specific place was named or implied — meaning the user's OWN current location should be used instead.
-- If the latest message is clearly unrelated to weather, return { "isWeatherQuery": false, "location": null }.`,
+- "needsLocationLookup": true if the message is asking about weather OR asking where the user currently is/what their location is.
+- "wantsWeather": true only if the message is specifically asking about weather/temperature/conditions (not just "where am I").
+- "location": the specific place being asked about, resolved from context if needed (e.g. if the user just replied "Dallas" to a clarifying question about which Texas city, location is "Dallas"). Use null if no specific place was named or implied — meaning the user's OWN current location should be determined instead (via their IP).
+- If the latest message is unrelated to both weather and location, return { "needsLocationLookup": false, "wantsWeather": false, "location": null }.`,
           },
           { role: "user", content: conversationSnippet },
         ],
@@ -60,10 +62,11 @@ Respond with ONLY valid JSON, no markdown, no commentary:
       const cleaned = raw.replace(/```json|```/g, "").trim();
       const parsed = JSON.parse(cleaned);
 
-      if (parsed.isWeatherQuery) {
+      if (parsed.needsLocationLookup) {
         let lat: number | null = null;
         let lon: number | null = null;
         let placeName = "";
+        let usedIP = false;
 
         if (parsed.location) {
           const geo = await geocodeLocation(parsed.location);
@@ -85,23 +88,33 @@ Respond with ONLY valid JSON, no markdown, no commentary:
             lat = ipLoc.lat;
             lon = ipLoc.lon;
             placeName = ipLoc.name;
+            usedIP = true;
           }
         }
 
         if (lat !== null && lon !== null) {
-          const weather = await getCurrentWeather(lat, lon);
-          if (weather) {
-            weatherContext = `
+          if (parsed.wantsWeather) {
+            const weather = await getCurrentWeather(lat, lon);
+            if (weather) {
+              weatherContext = `
 
-Live weather data (fetched just now for this request):
-Location: ${placeName}
+Live location and weather data (fetched just now for this request):
+${usedIP ? "The user's approximate current location (determined from their network/IP)" : "Location"}: ${placeName}
 Temperature: ${weather.temp}°C
 Condition: ${weather.description}
 Humidity: ${weather.humidity}%
 Wind speed: ${weather.windSpeed} km/h
 Observation time: ${weather.time}
 
-Use this real data to answer the user's weather question directly and naturally. Do not say you lack access to live weather data — you have it right here.`;
+Use this real data to answer the user's question directly and naturally. Do not say you lack access to live weather or location data — you have it right here.`;
+            }
+          } else {
+            weatherContext = `
+
+Live location data (fetched just now for this request):
+${usedIP ? "The user's approximate current location (determined from their network/IP)" : "Location"}: ${placeName}
+
+Use this to answer the user's location question directly and naturally. Note it's an approximate location based on their network, not precise GPS. Do not say you lack access to location data — you have it right here.`;
           }
         }
       }
