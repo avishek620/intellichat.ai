@@ -41,8 +41,11 @@ export async function POST(req: Request) {
 
     if (isWeatherQuery) {
       try {
+        const trailingWords = /\s+(today|now|currently|right now|tonight|this morning|this evening|this afternoon)\s*[?.!]*\s*$/i;
         const locationMatch = latestUserMessage.match(/(?:in|at|for)\s+([A-Za-z\s,]+?)(?:[?.!]|$)/i);
-        const explicitLocation = locationMatch ? locationMatch[1].trim() : null;
+        const explicitLocation = locationMatch
+          ? locationMatch[1].trim().replace(trailingWords, "").trim()
+          : null;
 
         let lat: number | null = null;
         let lon: number | null = null;
