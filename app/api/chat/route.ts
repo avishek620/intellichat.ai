@@ -55,12 +55,23 @@ Respond with ONLY valid JSON, no markdown, no commentary:
           },
           { role: "user", content: conversationSnippet },
         ],
-        max_completion_tokens: 100,
+      max_completion_tokens: 500,
       });
 
       const raw = classifyResponse.choices[0].message.content || "{}";
+      console.log("WEATHER CLASSIFIER finish_reason:", classifyResponse.choices[0].finish_reason);
+      console.log("WEATHER CLASSIFIER raw output:", JSON.stringify(raw));
+
       const cleaned = raw.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(cleaned);
+
+      let parsed: any = { needsLocationLookup: false, wantsWeather: false, location: null };
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (parseErr) {
+        console.error("WEATHER CLASSIFIER JSON parse failed. Raw was:", JSON.stringify(raw));
+      }
+
+      console.log("WEATHER CLASSIFIER parsed:", parsed);
 
       if (parsed.needsLocationLookup) {
         let lat: number | null = null;
