@@ -36,6 +36,9 @@ export async function POST(req: Request) {
 
     let weatherContext = "";
 
+    console.log("WEATHER DEBUG — latestUserMessage:", latestUserMessage);
+    console.log("WEATHER DEBUG — isWeatherQuery:", isWeatherQuery);
+
     if (isWeatherQuery) {
       try {
         const locationMatch = latestUserMessage.match(/(?:in|at|for)\s+([A-Za-z\s,]+?)(?:[?.!]|$)/i);
@@ -67,6 +70,8 @@ export async function POST(req: Request) {
             placeName = ipLoc.name;
           }
         }
+
+    console.log("WEATHER DEBUG — explicitLocation:", explicitLocation, "| lat:", lat, "| lon:", lon, "| placeName:", placeName);
 
         if (lat !== null && lon !== null) {
           const weather = await getCurrentWeather(lat, lon);
