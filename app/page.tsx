@@ -517,7 +517,7 @@ function formatTime(ms: number) {
 
     console.log("Detected slide intent:", intent, "| heuristic hit:", !!heuristicIntent);
 
-    if (intent === "create" || (intent === "edit" && slideDeck)) {
+        if (intent === "create" || (intent === "edit" && currentDecks.length > 0)) {
       const userMessage: Message = { role: "user", content: prompt };
       setMessages((prev) => [...prev, userMessage]);
       const instructions = prompt;
