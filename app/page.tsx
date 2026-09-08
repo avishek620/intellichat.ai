@@ -22,6 +22,14 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   responseTime?: number;
+  streaming?: boolean;
+}
+
+interface SlideDeckRecord {
+  id: string;
+  deck: any;
+  sources: { title: string; url: string }[];
+  createdAt: number;
 }
 
 interface Conversation {
@@ -29,6 +37,10 @@ interface Conversation {
   title: string;
   messages: Message[];
   timestamp: number;
+  decks?: SlideDeckRecord[];
+  documentText?: string;
+  uploadedFileNames?: string[];
+  uploadedImages?: string[];
 }
 
 function MessageContent({ content }: { content: string }) {
@@ -104,6 +116,8 @@ export default function Home() {
 
   const [responseMode, setResponseMode] = useState<"smart" | "deep">("smart");
 
+  const [preferredTheme, setPreferredTheme] = useState("auto");
+
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
 
@@ -125,6 +139,16 @@ export default function Home() {
   const [totalInputTokens, setTotalInputTokens] = useState(0);
   const [totalOutputTokens, setTotalOutputTokens] = useState(0);
 
+
+  const [currentDecks, setCurrentDecks] = useState<SlideDeckRecord[]>([]);
+  const [generatingSlides, setGeneratingSlides] = useState(false);
+  const [showLatestDeckCard, setShowLatestDeckCard] = useState(false);
+  const [decksListOpen, setDecksListOpen] = useState(false);
+
+  const [slideStepsList, setSlideStepsList] = useState<{ text: string; done: boolean }[]>([]);
+
+  const [chatSteps, setChatSteps] = useState<{ text: string; done: boolean }[]>([]);
+
   const USD_TO_INR = 100;
   const INPUT_COST_PER_1K_TOKENS_USD = 0.0025;
   const OUTPUT_COST_PER_1K_TOKENS_USD = 0.015;
@@ -135,12 +159,33 @@ export default function Home() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const hasHydrated = useRef(false);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
       behavior: "smooth",
     });
   }, [messages]);
 
+  useEffect(() => {
+    if (!hasHydrated.current) return;
+    if (messages.length <= 1) return;
+    sessionStorage.setItem("intellichat-current-messages", JSON.stringify(messages));
+    sessionStorage.setItem("intellichat-current-active-id", activeConversationId || "");
+  }, [messages, activeConversationId]);
+
+  useEffect(() => {
+    if (!hasHydrated.current) return;
+    sessionStorage.setItem("intellichat-current-document-text", documentText);
+    sessionStorage.setItem("intellichat-current-filenames", JSON.stringify(uploadedFileNames));
+    sessionStorage.setItem("intellichat-current-images", JSON.stringify(uploadedImages));
+  }, [documentText, uploadedFileNames, uploadedImages]);
+
+  useEffect(() => {
+    if (!hasHydrated.current) return;
+    if (!activeConversationId) return;
+    persistConversationState();
+  }, [documentText, uploadedFileNames, uploadedImages]);
 
   useEffect(() => {
     const saved = localStorage.getItem("intellichat-conversations");
@@ -168,6 +213,49 @@ export default function Home() {
       setNameSubmitted(true);
     }
 
+    const savedCurrentMessages = sessionStorage.getItem("intellichat-current-messages");
+    if (savedCurrentMessages) {
+      try {
+        setMessages(JSON.parse(savedCurrentMessages));
+      } catch (err) {
+        console.error("Failed to restore current conversation:", err);
+      }
+    }
+
+    const savedActiveId = sessionStorage.getItem("intellichat-current-active-id");
+    if (savedActiveId) {
+      setActiveConversationId(savedActiveId);
+    }
+
+    const savedDocText = sessionStorage.getItem("intellichat-current-document-text");
+    if (savedDocText) setDocumentText(savedDocText);
+
+    const savedFilenames = sessionStorage.getItem("intellichat-current-filenames");
+    if (savedFilenames) {
+      try { setUploadedFileNames(JSON.parse(savedFilenames)); } catch {}
+    }
+
+    const savedImages = sessionStorage.getItem("intellichat-current-images");
+    if (savedImages) {
+      try { setUploadedImages(JSON.parse(savedImages)); } catch {}
+    }
+
+    const savedActiveIdForDecks = sessionStorage.getItem("intellichat-current-active-id");
+    if (savedActiveIdForDecks) {
+      try {
+        const allConvsRaw = localStorage.getItem("intellichat-conversations");
+        if (allConvsRaw) {
+          const allConvs: Conversation[] = JSON.parse(allConvsRaw);
+          const match = allConvs.find((c) => c.id === savedActiveIdForDecks);
+          if (match && match.decks) {
+            setCurrentDecks(match.decks);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to restore decks for active conversation:", err);
+      }
+    }
+
     if (savedUnlocked === "true" && savedAccessStart) {
       setUnlocked(true);
       setSessionAccessStart(parseInt(savedAccessStart));
@@ -180,6 +268,8 @@ export default function Home() {
     if (savedOutputTokens) {
       setTotalOutputTokens(parseInt(savedOutputTokens));
     }
+
+    hasHydrated.current = true;
   }, []);
 
   useEffect(() => {
@@ -252,6 +342,17 @@ function formatTime(ms: number) {
     return `${minutes}:${seconds.toString().padStart(2, "0")}`;
   }
 
+  function pushStep(setter: React.Dispatch<React.SetStateAction<{ text: string; done: boolean }[]>>, text: string) {
+    setter((prev) => {
+      const updated = prev.map((s, i) => (i === prev.length - 1 ? { ...s, done: true } : s));
+      return [...updated, { text, done: false }];
+    });
+  }
+
+  function clearSteps(setter: React.Dispatch<React.SetStateAction<{ text: string; done: boolean }[]>>) {
+    setter([]);
+  }
+
   function handleNameSubmit() {
     if (!firstName.trim() || !lastName.trim()) return;
 
@@ -292,18 +393,19 @@ function formatTime(ms: number) {
     setCheckingCode(false);
   }
 
-
-
   function saveCurrentConversation() {
     const realMessages = messages.filter((m, i) => !(i === 0 && m.role === "assistant"));
-    if (realMessages.length === 0) return;
+    if (realMessages.length === 0 && currentDecks.length === 0) return;
+    persistConversationState();
+  }
+
+  function persistConversationState(decksOverride?: SlideDeckRecord[]) {
+    const id = activeConversationId || Date.now().toString();
 
     const firstUserMessage = messages.find((m) => m.role === "user");
     const title = firstUserMessage
       ? firstUserMessage.content.slice(0, 40)
       : "Untitled chat";
-
-    const id = activeConversationId || Date.now().toString();
 
     setConversations((prev) => {
       const existingIndex = prev.findIndex((c) => c.id === id);
@@ -312,6 +414,10 @@ function formatTime(ms: number) {
         title,
         messages,
         timestamp: Date.now(),
+        decks: decksOverride ?? currentDecks,
+        documentText,
+        uploadedFileNames,
+        uploadedImages,
       };
 
       let updated;
@@ -325,8 +431,11 @@ function formatTime(ms: number) {
       localStorage.setItem("intellichat-conversations", JSON.stringify(updated));
       return updated;
     });
-  }
 
+    if (!activeConversationId) {
+      setActiveConversationId(id);
+    }
+  }
 
   function handleManualSave() {
     saveCurrentConversation();
@@ -338,6 +447,12 @@ function formatTime(ms: number) {
     saveCurrentConversation();
     setMessages(conv.messages);
     setActiveConversationId(conv.id);
+    setCurrentDecks(conv.decks || []);
+    setDocumentText(conv.documentText || "");
+    setUploadedFileNames(conv.uploadedFileNames || []);
+    setUploadedImages(conv.uploadedImages || []);
+    setUploadedFiles([]);
+    setShowLatestDeckCard(false);
   }
 
   function deleteConversation(id: string, e: React.MouseEvent) {
@@ -352,8 +467,70 @@ function formatTime(ms: number) {
     }
   }
 
-  async function sendMessage() {
+
+        function detectSlideIntentHeuristic(text: string, hasDeck: boolean): "create" | "edit" | null {
+    const lower = text.toLowerCase();
+
+    const deckNouns = ["slide", "slides", "deck", "presentation", "pptx", "ppt", "powerpoint"];
+    const createVerbs = ["generate", "create", "build", "make", "produce", "prepare", "design", "put together"];
+    const editVerbs = [
+      "edit", "update", "change", "modify", "revise", "fix", "add", "remove", "rework",
+      "regenerate", "recreate", "redo", "resend", "reattach", "redownload", "correct", "rebuild",
+      "fill", "complete", "finish", "improve", "enhance", "redesign",
+    ];
+
+    const hasDeckNoun = deckNouns.some((n) => lower.includes(n));
+    const hasCreateVerb = createVerbs.some((v) => lower.includes(v));
+    const hasEditVerb = editVerbs.some((v) => lower.includes(v));
+
+    if (hasDeckNoun && hasEditVerb && hasDeck) return "edit";
+    if (hasDeckNoun && hasCreateVerb) return "create";
+    if (hasDeckNoun && hasDeck && (lower.includes("download") || lower.includes("blank") || lower.includes("missing"))) return "edit";
+
+    return null;
+  }
+
+
+   async function sendMessage() {
     if (!prompt.trim()) return;
+    if (loading || generatingSlides) return;
+
+    let intent: "create" | "edit" | "none" = "none";
+
+  const heuristicIntent = detectSlideIntentHeuristic(prompt, currentDecks.length > 0);
+
+    if (heuristicIntent) {
+      intent = heuristicIntent;
+    } else {
+      try {
+        const intentRes = await fetch("/api/classify-intent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: prompt, hasExistingDeck: currentDecks.length > 0 }),
+        });
+        const intentData = await intentRes.json();
+        intent = intentData.intent;
+      } catch (err) {
+        console.error("Intent classification error:", err);
+      }
+    }
+
+    console.log("Detected slide intent:", intent, "| heuristic hit:", !!heuristicIntent);
+
+    if (intent === "create" || (intent === "edit" && slideDeck)) {
+      const userMessage: Message = { role: "user", content: prompt };
+      setMessages((prev) => [...prev, userMessage]);
+      const instructions = prompt;
+      setPrompt("");
+
+      const lastAssistantMsg = [...messages].reverse().find(
+        (m) => m.role === "assistant" && m.content.length > 400
+      );
+      const priorContent = lastAssistantMsg ? lastAssistantMsg.content : "";
+
+      await runSlideRequest(intent, instructions, priorContent);
+      return;
+    }
 
     const userMessage: Message = {
       role: "user",
@@ -370,83 +547,121 @@ setPrompt("");
 
 setLoading(true);
 
-try {
-  const formData = new FormData();
+    try {
+      const formData = new FormData();
 
-formData.append(
-  "messages",
-  JSON.stringify(updatedMessages)
-);
+      formData.append("messages", JSON.stringify(updatedMessages));
+      formData.append("documentText", documentText);
+      formData.append("fileName", uploadedFileNames.join(", "));
+      formData.append("firstName", firstName);
+      formData.append("lastName", lastName);
+      formData.append("responseMode", responseMode);
 
-formData.append("documentText", documentText);
-formData.append("fileName", uploadedFileNames.join(", "));
+      currentImages.forEach((img) => {
+        formData.append("images", img);
+      });
 
-formData.append("firstName", firstName);
-formData.append("lastName", lastName);
+      uploadedFiles.forEach((file) => {
+        formData.append("files", file);
+      });
 
-formData.append("responseMode", responseMode);
+      const startTime = Date.now();
 
-currentImages.forEach((img) => {
-  formData.append("images", img);
-});
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        body: formData,
+      });
 
-uploadedFiles.forEach((file) => {
-  formData.append("files", file);
-});
+      if (!res.body) throw new Error("No response stream");
 
-const startTime = Date.now();
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let accumulatedText = "";
+      let hasStartedStreaming = false;
 
-const res = await fetch("/api/chat", {
-  method: "POST",
-  body: formData,
-});
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      const data = await res.json();
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-      const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+        for (const line of lines) {
+          if (!line.trim()) continue;
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: data.response,
-          responseTime: parseFloat(elapsedSeconds),
-        },
-      ]);
+          const parsed = JSON.parse(line);
 
-      if (data.usage) {
-        setTotalInputTokens((prev) => {
-          const updated = prev + (data.usage.promptTokens || 0);
-          sessionStorage.setItem("intellichat-input-tokens", updated.toString());
-          return updated;
-        });
+            if (parsed.type === "status") {
+            pushStep(setChatSteps, parsed.text);
+          } else if (parsed.type === "chunk") {
+            accumulatedText += parsed.text;
 
-        setTotalOutputTokens((prev) => {
-          const updated = prev + (data.usage.completionTokens || 0);
-          sessionStorage.setItem("intellichat-output-tokens", updated.toString());
-          return updated;
-        });
+            if (!hasStartedStreaming) {
+              hasStartedStreaming = true;
+              clearSteps(setChatSteps);
+
+              setMessages((prev) => [
+                ...prev,
+                { role: "assistant", content: accumulatedText, streaming: true },
+              ]);
+            } else {
+              setMessages((prev) => {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                  ...updated[updated.length - 1],
+                  content: accumulatedText,
+                };
+                return updated;
+              });
+            }
+          } else if (parsed.type === "done") {
+            const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === "assistant") {
+                updated[updated.length - 1] = {
+                  ...last,
+                  streaming: false,
+                  responseTime: parseFloat(elapsedSeconds),
+                };
+              }
+              return updated;
+            });
+
+            if (parsed.usage) {
+              setTotalInputTokens((prev) => {
+                const updatedVal = prev + (parsed.usage.promptTokens || 0);
+                sessionStorage.setItem("intellichat-input-tokens", updatedVal.toString());
+                return updatedVal;
+              });
+              setTotalOutputTokens((prev) => {
+                const updatedVal = prev + (parsed.usage.completionTokens || 0);
+                sessionStorage.setItem("intellichat-output-tokens", updatedVal.toString());
+                return updatedVal;
+              });
+            }
+            } else if (parsed.type === "error") {
+            clearSteps(setChatSteps);
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `⚠️ ${parsed.message}` },
+            ]);
+          }
+        }
       }
-
-      // setUploadedFileNames([]);
-      // setDocumentText("");
-      // setUploadedImages([]);
-      // setUploadedFiles([]);
-
     } catch (err) {
+      clearSteps(setChatSteps);
       setMessages((prev) => [
         ...prev,
-        {
-          role: "assistant",
-          content:
-            "⚠️ Unable to connect to Azure OpenAI.",
-        },
+        { role: "assistant", content: "⚠️ Unable to connect to Azure OpenAI." },
       ]);
     }
 
-    // setUploadedFileNames([]);
-    // setUploadedImages([]);
-    // setUploadedFiles([]);
+    clearSteps(setChatSteps);
     setLoading(false);
   }
 
@@ -560,6 +775,688 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
     }
   }
 
+
+  async function runSlideRequest(mode: "create" | "edit", instructions: string, priorContent: string = "") {
+    setGeneratingSlides(true);
+    setSlideStepsList([{ text: "Starting...", done: false }]);
+
+    const existingDeckForEdit = currentDecks.length > 0 ? currentDecks[currentDecks.length - 1].deck : undefined;
+
+    try {
+      const res = await fetch("/api/generate-slides", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode,
+          instructions,
+          documentText,
+          priorContent,
+          preferredTheme,
+          existingDeck: mode === "edit" ? existingDeckForEdit : undefined,
+        }),
+      });
+
+      if (!res.body) throw new Error("No response stream");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalResult: any = null;
+      let errorMsg: string | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("STATUS:")) {
+            pushStep(setSlideStepsList, line.slice(7));
+          } else if (line.startsWith("RESULT:")) {
+            finalResult = JSON.parse(line.slice(7));
+          } else if (line.startsWith("ERROR:")) {
+            errorMsg = line.slice(6);
+          }
+        }
+      }
+
+      if (finalResult?.deck) {
+        const newRecord: SlideDeckRecord = {
+          id: Date.now().toString() + Math.random().toString(36).slice(2, 7),
+          deck: finalResult.deck,
+          sources: finalResult.sources || [],
+          createdAt: Date.now(),
+        };
+
+        const updatedDecks =
+          mode === "edit" && currentDecks.length > 0
+            ? [...currentDecks.slice(0, -1), newRecord]
+            : [...currentDecks, newRecord];
+
+        setCurrentDecks(updatedDecks);
+        setShowLatestDeckCard(true);
+        persistConversationState(updatedDecks);
+
+
+        if (finalResult.usage) {
+          setTotalInputTokens((prev) => {
+            const updatedVal = prev + (finalResult.usage.promptTokens || 0);
+            sessionStorage.setItem("intellichat-input-tokens", updatedVal.toString());
+            return updatedVal;
+          });
+          setTotalOutputTokens((prev) => {
+            const updatedVal = prev + (finalResult.usage.completionTokens || 0);
+            sessionStorage.setItem("intellichat-output-tokens", updatedVal.toString());
+            return updatedVal;
+          });
+        }
+
+        setTimeout(() => {
+          messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        }, 100);
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content:
+              mode === "edit"
+                ? `✅ Updated the deck based on: "${instructions}"`
+                : `✅ I've built a ${finalResult.deck.slides.length}-slide deck: "${finalResult.deck.deckTitle}". You can download it below, or ask me to edit any slide.`,
+          },
+        ]);
+      } else {
+        setMessages((prev) => [...prev, { role: "assistant", content: `⚠️ ${errorMsg || "Slide generation failed."}` }]);
+      }
+    } catch (err) {
+      setMessages((prev) => [...prev, { role: "assistant", content: "⚠️ Failed to process slide request." }]);
+    }
+
+    setSlideStepsList([]);
+    setGeneratingSlides(false);
+  }
+
+  async function downloadSlideDeck(deckRecord: SlideDeckRecord) {
+    const deck = deckRecord.deck;
+    if (!deck) return;
+
+    const pptxgen = (await import("pptxgenjs")).default;
+    const pres = new pptxgen();
+    pres.defineLayout({ name: "WIDE", width: 13.333, height: 7.5 });
+    pres.layout = "WIDE";
+
+    const themes: Record<string, { primary: string; dark: string; light: string; accent: string }> = {
+      blue: { primary: "1E3A8A", dark: "0F1E42", light: "E8EFFB", accent: "2563EB" },
+      red: { primary: "8B1A1A", dark: "3A0A0A", light: "FBEAEA", accent: "DC2626" },
+      green: { primary: "14532D", dark: "0A2A16", light: "E7F5EC", accent: "16A34A" },
+      purple: { primary: "4C1D95", dark: "24093F", light: "F1EAFB", accent: "7C3AED" },
+      teal: { primary: "0F766E", dark: "042F2E", light: "E6FFFA", accent: "14B8A6" },
+      charcoal: { primary: "3F3F3F", dark: "1A1A1A", light: "F1EDE5", accent: "C9A227" },
+      slate: { primary: "334155", dark: "0F172A", light: "F1F5F9", accent: "F97316" },
+    };
+
+    const theme = themes[deck.colorTheme] || themes.blue;
+    const WHITE = "FFFFFF";
+    const DARK_TEXT = "1F2937";
+    const MID_GREY = "6B7280";
+    const PANEL_BORDER = "E2E8F0";
+
+    function getIcon(text: string): string {
+      const lower = text.toLowerCase();
+      if (/kafka|event|stream|queue|message bus/.test(lower)) return "📨";
+      if (/database|data store|storage|lakehouse|warehouse|profile store/.test(lower)) return "🗄️";
+      if (/cloud|azure|aws|gcp|kubernetes|openshift|container/.test(lower)) return "☁️";
+      if (/api|gateway|integration|interface/.test(lower)) return "🔌";
+      if (/ai|ml|model|predict|score|genai|llm/.test(lower)) return "🤖";
+      if (/security|encrypt|auth|identity|consent|privacy|access/.test(lower)) return "🔒";
+      if (/monitor|observ|dashboard|metric|log/.test(lower)) return "📈";
+      if (/analytics|report|insight|measurement/.test(lower)) return "📊";
+      if (/journey|orchestrat|workflow|channel/.test(lower)) return "🔀";
+      if (/crm|billing|bss|oss|erp|source system/.test(lower)) return "🏢";
+      if (/mobile|app|web|sdk/.test(lower)) return "📱";
+      return "▪️";
+    }
+
+    function addHeader(slide: any, eyebrow: string, title: string, subtitle?: string) {
+      slide.addShape(pres.ShapeType.rect, { x: 0, y: 0, w: 13.333, h: 0.08, fill: { color: theme.accent } });
+      if (eyebrow) {
+        slide.addText(eyebrow.toUpperCase(), {
+          x: 0.5, y: 0.35, w: 8, h: 0.25, fontSize: 11, bold: true, color: theme.accent, fontFace: "Arial",
+        });
+      }
+      const estimatedLines = title.length > 55 ? 2 : 1;
+      const titleY = 0.68;
+      const titleH = estimatedLines === 2 ? 0.95 : 0.55;
+      slide.addText(title, {
+        x: 0.5, y: titleY, w: 12.3, h: titleH, fontSize: 21, bold: true, color: theme.dark, fontFace: "Arial", fit: "shrink", valign: "top",
+      });
+      const subtitleY = titleY + titleH + 0.1;
+      if (subtitle) {
+        slide.addText(subtitle, {
+          x: 0.5, y: subtitleY, w: 12.3, h: 0.3, fontSize: 11, color: MID_GREY, fontFace: "Arial", fit: "shrink",
+        });
+      }
+    }
+
+    function addFooter(slide: any, pageNum: number) {
+      slide.addShape(pres.ShapeType.rect, { x: 0, y: 7.18, w: 13.333, h: 0.32, fill: { color: theme.dark } });
+      slide.addText(deck.deckTitle, {
+        x: 0.35, y: 7.20, w: 10, h: 0.28, fontSize: 8.5, color: WHITE, fontFace: "Arial", fit: "shrink",
+      });
+      slide.addText(String(pageNum), {
+        x: 12.5, y: 7.20, w: 0.5, h: 0.28, fontSize: 9, bold: true, color: WHITE, fontFace: "Arial", align: "right",
+      });
+    }
+
+    function addPanel(slide: any, x: number, y: number, w: number, h: number, fill: string, border = PANEL_BORDER) {
+      slide.addShape(pres.ShapeType.roundRect, {
+        x, y, w, h, rectRadius: 0.08, fill: { color: fill }, line: { color: border, width: 0.75 },
+      });
+    }
+
+    function addBullets(slide: any, items: string[], x: number, y: number, w: number, h: number, size = 13, color = DARK_TEXT) {
+      slide.addText(
+        items.map((t) => ({ text: t, options: { bullet: { code: "2022", indent: 18 }, breakLine: true, color, fontSize: size, fontFace: "Arial" } })),
+        { x, y, w, h, valign: "top", fit: "shrink" }
+      );
+    }
+
+    deck.slides.forEach((slide: any, idx: number) => {
+      const s = pres.addSlide();
+      s.background = { color: WHITE };
+
+      if (slide.type === "title") {
+        const titleLen = (deck.deckTitle || "").length;
+        const titleLines = titleLen > 80 ? 3 : titleLen > 40 ? 2 : 1;
+        const layout = slide.titleLayout || "darkLeft";
+
+        if (layout === "centered") {
+          s.background = { color: theme.dark };
+          const titleFontSize = titleLines === 3 ? 28 : titleLines === 2 ? 32 : 36;
+          const titleH = titleLines * 0.6;
+          const titleY = 2.9;
+
+          s.addShape(pres.ShapeType.rect, { x: 5.167, y: titleY - 0.25, w: 3.0, h: 0.04, fill: { color: theme.accent } });
+
+          s.addText(deck.deckTitle, {
+            x: 0.8, y: titleY, w: 11.733, h: titleH, fontSize: titleFontSize, bold: true, color: WHITE,
+            align: "center", fontFace: "Arial", fit: "shrink", valign: "top",
+          });
+
+          const subtitleY = titleY + titleH + 0.25;
+          if (slide.subtitle) {
+            s.addText(slide.subtitle, {
+              x: 1.5, y: subtitleY, w: 10.333, h: 0.5, fontSize: 13, color: "C7D2E0",
+              align: "center", fontFace: "Arial", fit: "shrink",
+            });
+          }
+          return;
+        }
+
+        if (layout === "splitPanel") {
+          s.background = { color: WHITE };
+          const panelW = 4.0;
+
+          s.addShape(pres.ShapeType.rect, { x: 0, y: 0, w: panelW, h: 7.5, fill: { color: theme.primary } });
+          s.addShape(pres.ShapeType.rect, { x: panelW, y: 0, w: 0.06, h: 7.5, fill: { color: theme.accent } });
+
+          const titleFontSize = titleLines === 3 ? 26 : titleLines === 2 ? 30 : 34;
+          const titleH = titleLines * 0.58;
+          const titleY = 3.0;
+
+          s.addText(deck.deckTitle, {
+            x: panelW + 0.6, y: titleY, w: 13.333 - panelW - 1.1, h: titleH, fontSize: titleFontSize, bold: true,
+            color: theme.dark, align: "left", fontFace: "Arial", fit: "shrink", valign: "top",
+          });
+
+          const subtitleY = titleY + titleH + 0.2;
+          if (slide.subtitle) {
+            s.addText(slide.subtitle, {
+              x: panelW + 0.6, y: subtitleY, w: 13.333 - panelW - 1.1, h: 0.5, fontSize: 13, color: MID_GREY,
+              fontFace: "Arial", fit: "shrink",
+            });
+          }
+          return;
+        }
+
+        // default: darkLeft
+        s.background = { color: theme.dark };
+        const titleFontSize = titleLines === 3 ? 30 : titleLines === 2 ? 34 : 38;
+        const titleH = titleLines * 0.62;
+        const titleY = 2.6;
+        const titleAlign = slide.titleAlign === "center" ? "center" : "left";
+
+        s.addText(deck.deckTitle, {
+          x: 0.8, y: titleY, w: 11.7, h: titleH, fontSize: titleFontSize, bold: true, color: WHITE, align: titleAlign, fontFace: "Arial", fit: "shrink", valign: "top",
+        });
+
+        const subtitleY = titleY + titleH + 0.15;
+        const accentY = slide.subtitle ? subtitleY + 0.55 : titleY + titleH + 0.2;
+
+        s.addShape(pres.ShapeType.rect, { x: 0, y: accentY, w: 13.333, h: 0.06, fill: { color: theme.accent } });
+
+        if (slide.subtitle) {
+          s.addText(slide.subtitle, {
+            x: 0.8, y: subtitleY, w: 11.7, h: 0.5, fontSize: 14, color: "C7D2E0", fontFace: "Arial", fit: "shrink", align: titleAlign,
+          });
+        }
+        return;
+      }
+
+      addHeader(s, slide.eyebrow || "", slide.title || "", slide.subtitle);
+      addFooter(s, idx + 1);
+
+      let rendered = false;
+
+      if (slide.type === "flow" && slide.flowStages && slide.flowStages.length > 0) {
+        rendered = true;
+        const stages = slide.flowStages;
+        const startX = 0.5;
+        const cardW = (12.3 - (stages.length - 1) * 0.35) / stages.length;
+        stages.forEach((stage: any, i: number) => {
+          const x = startX + i * (cardW + 0.35);
+          addPanel(s, x, 2.15, cardW, 1.9, i % 2 === 0 ? theme.light : WHITE);
+          s.addShape(pres.ShapeType.ellipse, { x: x + 0.2, y: 2.35, w: 0.4, h: 0.4, fill: { color: theme.accent } });
+          s.addText(String(i + 1), { x: x + 0.2, y: 2.35, w: 0.4, h: 0.4, fontSize: 13, bold: true, color: WHITE, align: "center", valign: "middle", fontFace: "Arial" });
+          s.addText(stage.title || "", { x: x + 0.15, y: 2.9, w: cardW - 0.3, h: 0.35, fontSize: 14, bold: true, color: theme.dark, fontFace: "Arial", fit: "shrink" });
+          s.addText(stage.detail || "", { x: x + 0.15, y: 3.3, w: cardW - 0.3, h: 0.65, fontSize: 10, color: MID_GREY, fontFace: "Arial", fit: "shrink" });
+          if (i < stages.length - 1) {
+            s.addText("›", { x: x + cardW, y: 2.7, w: 0.35, h: 0.5, fontSize: 24, bold: true, color: theme.accent, align: "center", fontFace: "Arial" });
+          }
+        });
+      }
+
+      else if (slide.type === "layeredStack" && slide.layers && slide.layers.length > 0) {
+        rendered = true;
+        const layers = slide.layers.map((l: any) => ({
+          heading: l.heading || "",
+          items: (l.items || []).slice(0, 4),
+        }));
+
+        const availableH = 4.75;
+        const gap = 0.14;
+        const minLayerH = 0.55;
+        const headingH = 0.28;
+        const lineH = 0.19;
+
+        const rawHeights = layers.map((l: any) => {
+          const itemLines = Math.max(1, Math.ceil(l.items.length / 2));
+          return Math.max(minLayerH, headingH + itemLines * lineH + 0.14);
+        });
+
+        const totalRaw = rawHeights.reduce((a: number, b: number) => a + b, 0) + gap * (layers.length - 1);
+        const scale = totalRaw > availableH ? availableH / totalRaw : 1;
+        const fontScale = scale < 1 ? Math.max(0.75, scale) : 1;
+
+        let y = 2.15;
+        layers.forEach((layer: any, i: number) => {
+          const layerH = rawHeights[i] * scale;
+
+          addPanel(s, 0.5, y, 12.3, layerH, i % 2 === 0 ? theme.light : WHITE);
+          s.addText(layer.heading, {
+            x: 0.75, y: y + 0.06, w: 11.8, h: headingH,
+            fontSize: 12.5 * fontScale, bold: true, color: theme.dark, fontFace: "Arial", fit: "shrink",
+          });
+
+          const itemsWithIcons = layer.items.map((item: string) => `${getIcon(item)} ${item}`).join("     ");
+          s.addText(itemsWithIcons, {
+            x: 0.75, y: y + headingH + 0.08, w: 11.8, h: layerH - headingH - 0.14,
+            fontSize: 9.5 * fontScale, color: MID_GREY, fontFace: "Arial", valign: "top", fit: "shrink",
+          });
+
+          const gapScaled = gap * scale;
+          if (i < layers.length - 1 && gapScaled > 0.06) {
+            s.addText("▼", {
+              x: 6.15, y: y + layerH + gapScaled / 2 - 0.08, w: 1.0, h: 0.18,
+              fontSize: 12, color: theme.accent, align: "center", fontFace: "Arial",
+            });
+          }
+
+          y += layerH + gapScaled;
+        });
+      }
+
+      else if (slide.type === "hubAndSpoke" && slide.hub && slide.spokes && slide.spokes.length > 0) {
+        rendered = true;
+        const spokes = slide.spokes.slice(0, 6).map((sp: any) => ({
+          heading: sp.heading || "",
+          items: (sp.items || []).slice(0, 3),
+        }));
+
+        const areaX = 0.5, areaY = 2.15, areaW = 12.3, areaH = 4.75;
+        const cx = areaX + areaW / 2;
+        const cy = areaY + areaH / 2;
+
+        const hubW = 3.0, hubH = 1.15;
+        const spokeW = 2.7, spokeH = 1.15;
+
+        const rx = (areaW - hubW) / 2 - 0.35;
+        const ry = (areaH - hubH) / 2 - 0.25;
+
+        const n = spokes.length;
+
+        spokes.forEach((_: any, i: number) => {
+          const angle = (2 * Math.PI * i) / n - Math.PI / 2;
+          const sx = cx + rx * Math.cos(angle);
+          const sy = cy + ry * Math.sin(angle);
+          s.addShape(pres.ShapeType.line, {
+            x: Math.min(cx, sx),
+            y: Math.min(cy, sy),
+            w: Math.abs(sx - cx) || 0.01,
+            h: Math.abs(sy - cy) || 0.01,
+            line: { color: theme.accent, width: 1.5 },
+            flipV: sy < cy,
+            flipH: sx < cx,
+          });
+        });
+
+        addPanel(s, cx - hubW / 2, cy - hubH / 2, hubW, hubH, theme.dark, theme.dark);
+        s.addText(slide.hub.heading || "", {
+          x: cx - hubW / 2 + 0.1, y: cy - hubH / 2 + 0.08, w: hubW - 0.2, h: 0.35,
+          fontSize: 13, bold: true, color: WHITE, fontFace: "Arial", fit: "shrink", align: "center",
+        });
+        const hubItems = (slide.hub.items || []).slice(0, 3).map((it: string) => `${getIcon(it)} ${it}`).join("   ");
+        s.addText(hubItems, {
+          x: cx - hubW / 2 + 0.1, y: cy - hubH / 2 + 0.45, w: hubW - 0.2, h: hubH - 0.5,
+          fontSize: 8.5, color: "D9E2F1", fontFace: "Arial", valign: "top", align: "center", fit: "shrink",
+        });
+
+        spokes.forEach((sp: any, i: number) => {
+          const angle = (2 * Math.PI * i) / n - Math.PI / 2;
+          const bx = cx + rx * Math.cos(angle) - spokeW / 2;
+          const by = cy + ry * Math.sin(angle) - spokeH / 2;
+
+          addPanel(s, bx, by, spokeW, spokeH, i % 2 === 0 ? theme.light : WHITE);
+          s.addText(sp.heading, {
+            x: bx + 0.1, y: by + 0.06, w: spokeW - 0.2, h: 0.3,
+            fontSize: 11, bold: true, color: theme.dark, fontFace: "Arial", fit: "shrink",
+          });
+          const spokeItems = sp.items.map((it: string) => `${getIcon(it)} ${it}`).join("  ");
+          s.addText(spokeItems, {
+            x: bx + 0.1, y: by + 0.4, w: spokeW - 0.2, h: spokeH - 0.45,
+            fontSize: 8, color: MID_GREY, fontFace: "Arial", valign: "top", fit: "shrink",
+          });
+        });
+      }
+
+      else if (slide.type === "peerToPeer" && slide.nodes && slide.nodes.length > 0) {
+        rendered = true;
+        const nodes = slide.nodes.slice(0, 6).map((n: any) => ({
+          heading: n.heading || "",
+          items: (n.items || []).slice(0, 3),
+        }));
+
+        const areaX = 0.5, areaY = 2.15, areaW = 12.3, areaH = 4.75;
+        const cx = areaX + areaW / 2;
+        const cy = areaY + areaH / 2;
+
+        const nodeW = 2.9, nodeH = 1.15;
+        const rx = (areaW - nodeW) / 2 - 0.2;
+        const ry = (areaH - nodeH) / 2 - 0.15;
+
+        const n = nodes.length;
+        const positions = nodes.map((_: any, i: number) => {
+          const angle = (2 * Math.PI * i) / n - Math.PI / 2;
+          return { x: cx + rx * Math.cos(angle), y: cy + ry * Math.sin(angle) };
+        });
+
+        positions.forEach((pos: any, i: number) => {
+          const next = positions[(i + 1) % n];
+          s.addShape(pres.ShapeType.line, {
+            x: Math.min(pos.x, next.x),
+            y: Math.min(pos.y, next.y),
+            w: Math.abs(next.x - pos.x) || 0.01,
+            h: Math.abs(next.y - pos.y) || 0.01,
+            line: { color: theme.accent, width: 1.25 },
+            flipV: next.y < pos.y,
+            flipH: next.x < pos.x,
+          });
+        });
+
+        nodes.forEach((node: any, i: number) => {
+          const pos = positions[i];
+          const bx = pos.x - nodeW / 2;
+          const by = pos.y - nodeH / 2;
+          addPanel(s, bx, by, nodeW, nodeH, i % 2 === 0 ? theme.light : WHITE);
+          s.addText(node.heading, {
+            x: bx + 0.1, y: by + 0.06, w: nodeW - 0.2, h: 0.3,
+            fontSize: 11, bold: true, color: theme.dark, fontFace: "Arial", fit: "shrink",
+          });
+          const nodeItems = node.items.map((it: string) => `${getIcon(it)} ${it}`).join("  ");
+          s.addText(nodeItems, {
+            x: bx + 0.1, y: by + 0.4, w: nodeW - 0.2, h: nodeH - 0.45,
+            fontSize: 8, color: MID_GREY, fontFace: "Arial", valign: "top", fit: "shrink",
+          });
+        });
+      }
+
+      else if (slide.type === "mesh" && slide.nodes && slide.nodes.length > 0) {
+        rendered = true;
+        const nodes = slide.nodes.slice(0, 5).map((n: any) => ({
+          heading: n.heading || "",
+          items: (n.items || []).slice(0, 2),
+        }));
+
+        const areaX = 0.5, areaY = 2.15, areaW = 12.3, areaH = 4.75;
+        const cx = areaX + areaW / 2;
+        const cy = areaY + areaH / 2;
+
+        const nodeW = 2.6, nodeH = 1.05;
+        const rx = (areaW - nodeW) / 2 - 0.2;
+        const ry = (areaH - nodeH) / 2 - 0.15;
+
+        const n = nodes.length;
+        const positions = nodes.map((_: any, i: number) => {
+          const angle = (2 * Math.PI * i) / n - Math.PI / 2;
+          return { x: cx + rx * Math.cos(angle), y: cy + ry * Math.sin(angle) };
+        });
+
+        for (let i = 0; i < n; i++) {
+          for (let j = i + 1; j < n; j++) {
+            const a = positions[i], b = positions[j];
+            s.addShape(pres.ShapeType.line, {
+              x: Math.min(a.x, b.x),
+              y: Math.min(a.y, b.y),
+              w: Math.abs(b.x - a.x) || 0.01,
+              h: Math.abs(b.y - a.y) || 0.01,
+              line: { color: theme.accent, width: 0.75, transparency: 40 },
+              flipV: b.y < a.y,
+              flipH: b.x < a.x,
+            });
+          }
+        }
+
+        nodes.forEach((node: any, i: number) => {
+          const pos = positions[i];
+          const bx = pos.x - nodeW / 2;
+          const by = pos.y - nodeH / 2;
+          addPanel(s, bx, by, nodeW, nodeH, theme.dark, theme.dark);
+          s.addText(node.heading, {
+            x: bx + 0.1, y: by + 0.06, w: nodeW - 0.2, h: 0.3,
+            fontSize: 10.5, bold: true, color: WHITE, fontFace: "Arial", fit: "shrink", align: "center",
+          });
+          const nodeItems = node.items.map((it: string) => `${getIcon(it)} ${it}`).join(" ");
+          s.addText(nodeItems, {
+            x: bx + 0.1, y: by + 0.38, w: nodeW - 0.2, h: nodeH - 0.4,
+            fontSize: 7.5, color: "D9E2F1", fontFace: "Arial", valign: "top", fit: "shrink", align: "center",
+          });
+        });
+      }
+
+      else if (slide.type === "verticalFlow" && slide.flowSteps && slide.flowSteps.length > 0) {
+        rendered = true;
+        const steps = slide.flowSteps.slice(0, 7);
+        const boxW = 8.5;
+        const x = (13.333 - boxW) / 2;
+        const areaY = 2.15, areaH = 4.75;
+        const gap = 0.12;
+
+        const estLines = steps.map((st: any) => {
+          const detailLen = (st.detail || "").length;
+          return detailLen > 70 ? 3 : detailLen > 40 ? 2 : 1;
+        });
+        const rawHeights = estLines.map((lines: number) => 0.35 + lines * 0.19 + 0.1);
+        const totalRaw = rawHeights.reduce((a: number, b: number) => a + b, 0) + gap * (steps.length - 1);
+        const scale = totalRaw > areaH ? areaH / totalRaw : 1;
+        const fontScale = scale < 1 ? Math.max(0.75, scale) : 1;
+
+        let y = areaY;
+        steps.forEach((step: any, i: number) => {
+          const boxH = rawHeights[i] * scale;
+          const isEnd = i === 0 || i === steps.length - 1;
+
+          addPanel(s, x, y, boxW, boxH, isEnd ? theme.primary : theme.light, theme.primary);
+          s.addText(`${getIcon(step.label || "")}  ${step.label || ""}`, {
+            x: x + 0.2, y: y + 0.05, w: boxW - 0.4, h: 0.3 * fontScale,
+            fontSize: 12 * fontScale, bold: true, color: isEnd ? WHITE : theme.dark, fontFace: "Arial", valign: "top", fit: "shrink",
+          });
+          if (step.detail) {
+            s.addText(step.detail, {
+              x: x + 0.2, y: y + 0.35 * fontScale, w: boxW - 0.4, h: boxH - 0.4 * fontScale,
+              fontSize: 9 * fontScale, color: isEnd ? "D9E2F1" : MID_GREY, fontFace: "Arial", valign: "top", fit: "shrink",
+            });
+          }
+
+          const gapScaled = gap * scale;
+          if (i < steps.length - 1 && gapScaled > 0.05) {
+            s.addText("▼", {
+              x: x + boxW / 2 - 0.3, y: y + boxH + gapScaled / 2 - 0.08, w: 0.6, h: 0.18,
+              fontSize: 12, bold: true, color: theme.accent, align: "center", fontFace: "Arial",
+            });
+          }
+          y += boxH + gapScaled;
+        });
+      }
+
+      else if (slide.type === "timeline" && slide.phases && slide.phases.length > 0) {
+        rendered = true;
+        const phases = slide.phases;
+        const gap = 0.3;
+        const cardW = (12.3 - gap * (phases.length - 1)) / phases.length;
+        let x = 0.5;
+        phases.forEach((phase: any) => {
+          addPanel(s, x, 2.15, cardW, 4.6, WHITE);
+          s.addShape(pres.ShapeType.rect, { x, y: 2.15, w: cardW, h: 0.08, fill: { color: theme.accent } });
+          s.addText(phase.name || "", { x: x + 0.15, y: 2.35, w: cardW - 0.3, h: 0.35, fontSize: 13, bold: true, color: theme.dark, fontFace: "Arial", fit: "shrink" });
+          if (phase.duration) {
+            s.addText(phase.duration, { x: x + 0.15, y: 2.7, w: cardW - 0.3, h: 0.25, fontSize: 9.5, bold: true, color: theme.accent, fontFace: "Arial" });
+          }
+          if (phase.items) {
+            addBullets(s, phase.items, x + 0.15, 3.05, cardW - 0.3, 3.5, 9.5);
+          }
+          x += cardW + gap;
+        });
+      }
+
+      else if (slide.type === "principles" && slide.principles && slide.principles.length > 0) {
+        rendered = true;
+        const principles = slide.principles.slice(0, 6);
+        addPanel(s, 0.5, 2.15, 12.3, 4.75, theme.dark, theme.dark);
+        s.addText(slide.principlesHeading || "Key Principles", { x: 0.85, y: 2.35, w: 11.6, h: 0.35, fontSize: 15, bold: true, color: WHITE, fontFace: "Arial", fit: "shrink" });
+
+        const startY = 2.83;
+        const endY = 6.75;
+        const rowH = (endY - startY) / principles.length;
+
+        principles.forEach((p: any, i: number) => {
+          const y = startY + i * rowH;
+          const badgeSize = Math.min(0.32, rowH - 0.15);
+          s.addShape(pres.ShapeType.ellipse, { x: 0.85, y, w: badgeSize, h: badgeSize, fill: { color: theme.accent } });
+          s.addText(String(i + 1), { x: 0.85, y, w: badgeSize, h: badgeSize, fontSize: 10, bold: true, color: WHITE, align: "center", valign: "middle", fontFace: "Arial" });
+          s.addText(p.heading || "", { x: 1.35, y: y - 0.02, w: 3.4, h: rowH - 0.05, fontSize: 11.5, bold: true, color: WHITE, fontFace: "Arial", fit: "shrink", valign: "top" });
+          s.addText(p.description || "", { x: 4.9, y: y - 0.02, w: 7.7, h: rowH - 0.05, fontSize: 10.5, color: "D9E2F1", fontFace: "Arial", fit: "shrink", valign: "top" });
+        });
+      }
+
+      else if (slide.type === "comparison" && slide.tableData && slide.tableData.headers) {
+        rendered = true;
+
+        const headers = slide.tableData.headers;
+        const dataRows = slide.tableData.rows.slice(0, 7);
+
+        function truncateCell(text: string, max: number) {
+          if (!text) return "";
+          return text.length > max ? text.slice(0, max - 1).trim() + "…" : text;
+        }
+
+        const avgCellLen =
+          dataRows.reduce(
+            (sum: number, row: string[]) => sum + row.reduce((s: number, c: string) => s + (c || "").length, 0),
+            0
+          ) / Math.max(1, dataRows.length * headers.length);
+
+        let bodyFontSize = 10.5;
+        let headerFontSize = 11;
+        if (dataRows.length > 5 || avgCellLen > 60) {
+          bodyFontSize = 9;
+          headerFontSize = 9.5;
+        }
+        if (dataRows.length > 7 || avgCellLen > 100) {
+          bodyFontSize = 8;
+          headerFontSize = 8.5;
+        }
+
+        const rows = [
+          headers.map((h: string) => ({
+            text: truncateCell(h, 60),
+            options: { bold: true, color: WHITE, fill: { color: theme.primary }, fontFace: "Arial", fontSize: headerFontSize },
+          })),
+          ...dataRows.map((row: string[]) =>
+            row.map((cell) => ({
+              text: truncateCell(cell, 150),
+              options: { color: DARK_TEXT, fontFace: "Arial", fontSize: bodyFontSize },
+            }))
+          ),
+        ];
+
+        s.addTable(rows, {
+          x: 0.5, y: 2.15, w: 12.3, h: 4.75,
+          autoPage: false,
+          valign: "top",
+          border: { type: "solid", color: PANEL_BORDER, pt: 0.75 },
+        });
+      }
+
+      else if (
+        (slide.type === "twoColumn" || slide.type === "section") &&
+        ((slide.leftBullets && slide.leftBullets.length > 0) || (slide.rightBullets && slide.rightBullets.length > 0))
+      ) {
+        rendered = true;
+        addPanel(s, 0.5, 2.15, 5.95, 4.75, theme.light);
+        s.addText(slide.leftHeading || "", { x: 0.75, y: 2.35, w: 5.5, h: 0.35, fontSize: 14, bold: true, color: theme.dark, fontFace: "Arial", fit: "shrink" });
+        addBullets(s, slide.leftBullets || [], 0.75, 2.8, 5.5, 3.9, 12);
+
+        addPanel(s, 6.85, 2.15, 5.95, 4.75, WHITE);
+        s.addText(slide.rightHeading || "", { x: 7.1, y: 2.35, w: 5.5, h: 0.35, fontSize: 14, bold: true, color: theme.dark, fontFace: "Arial", fit: "shrink" });
+        addBullets(s, slide.rightBullets || [], 7.1, 2.8, 5.5, 3.9, 12);
+      }
+
+      if (!rendered && slide.bullets && slide.bullets.length > 0) {
+        rendered = true;
+        addPanel(s, 0.5, 2.15, 12.3, 4.75, theme.light);
+        addBullets(s, slide.bullets, 0.85, 2.45, 11.6, 4.3, 13.5);
+      }
+
+      if (!rendered) {
+        addPanel(s, 0.5, 2.15, 12.3, 4.75, theme.light);
+        s.addText(
+          "Content for this slide is being finalized. Please ask to regenerate this specific slide for full detail.",
+          { x: 0.85, y: 3.9, w: 11.6, h: 1.0, fontSize: 13, italic: true, color: MID_GREY, align: "center", fontFace: "Arial" }
+        );
+      }
+
+      if (slide.notes) {
+        s.addNotes(slide.notes);
+      }
+    });
+
+    await pres.writeFile({ fileName: `${deck.deckTitle || "presentation"}.pptx` });
+  }
+
+
   return (
     <div className="flex h-screen bg-slate-950 text-white">
 
@@ -670,11 +1567,18 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
     ]);
 
     setActiveConversationId(null);
+    sessionStorage.removeItem("intellichat-current-messages");
+    sessionStorage.removeItem("intellichat-current-active-id");
+    sessionStorage.removeItem("intellichat-current-document-text");
+    sessionStorage.removeItem("intellichat-current-filenames");
+    sessionStorage.removeItem("intellichat-current-images");
     setPrompt("");
     setUploadedFileNames([]);
     setDocumentText("");
     setUploadedImages([]);
     setUploadedFiles([]);
+    setCurrentDecks([]);
+    setShowLatestDeckCard(false);
   }}
   className="w-full rounded-xl bg-blue-600 hover:bg-blue-700 py-3 flex items-center justify-center gap-2"
 >
@@ -723,6 +1627,34 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
           )}
 
         </div>
+
+        {sidebarOpen && currentDecks.length > 0 && (
+          <div className="p-4 border-t border-slate-800 text-xs text-slate-300">
+            <button
+              onClick={() => setDecksListOpen(!decksListOpen)}
+              className="w-full flex items-center justify-between text-slate-500 uppercase text-[10px] mb-2 hover:text-slate-300 transition"
+            >
+              <span>Decks in this conversation ({currentDecks.length})</span>
+              <span>{decksListOpen ? "▲" : "▼"}</span>
+            </button>
+
+            {decksListOpen && (
+              <div className="space-y-2 max-h-56 overflow-y-auto">
+                {currentDecks.map((record) => (
+                  <div key={record.id} className="bg-slate-800 rounded-lg p-2 space-y-1">
+                    <p className="font-medium truncate text-[11px]">{record.deck.deckTitle}</p>
+                    <button
+                      onClick={() => downloadSlideDeck(record)}
+                      className="w-full bg-blue-600 hover:bg-blue-700 rounded-md py-1.5 text-[11px] font-medium transition"
+                    >
+                      Download PPTX
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {sidebarOpen && unlocked && (
           <div className="p-4 border-t border-slate-800 text-xs text-slate-400 space-y-1">
@@ -882,7 +1814,7 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
 
             ))}
 
-            {loading && (
+              {loading && !(messages[messages.length - 1]?.role === "assistant" && messages[messages.length - 1]?.streaming) && (
 
               <div className="flex gap-4">
 
@@ -890,8 +1822,56 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
                   <Bot size={20} />
                 </div>
 
-                <div className="bg-slate-800 rounded-2xl px-5 py-4">
-                  Thinking...
+                <div className="bg-slate-800 rounded-2xl px-5 py-4 space-y-1.5 min-w-[240px]">
+                  {chatSteps.length === 0 ? (
+                    <div className="flex items-center gap-2 text-sm">
+                      <div className="animate-spin h-3.5 w-3.5 border-2 border-slate-500 border-t-white rounded-full" />
+                      <span>Thinking...</span>
+                    </div>
+                  ) : (
+                    chatSteps.map((step, i) => (
+                      <div key={i} className="flex items-center gap-2 text-sm">
+                        {step.done ? (
+                          <Check size={14} className="text-green-400 flex-shrink-0" />
+                        ) : (
+                          <div className="animate-spin h-3.5 w-3.5 border-2 border-slate-500 border-t-white rounded-full flex-shrink-0" />
+                        )}
+                        <span className={step.done ? "text-slate-400" : "text-white"}>{step.text}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+              </div>
+
+            )}
+
+            {generatingSlides && (
+
+              <div className="flex gap-4">
+
+                <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center">
+                  <Bot size={20} />
+                </div>
+
+                <div className="bg-slate-800 rounded-2xl px-5 py-4 space-y-1.5 min-w-[260px]">
+                  {slideStepsList.length === 0 ? (
+                    <div className="flex items-center gap-2 text-sm">
+                      <div className="animate-spin h-3.5 w-3.5 border-2 border-slate-500 border-t-white rounded-full" />
+                      <span>Working on your slides...</span>
+                    </div>
+                  ) : (
+                    slideStepsList.map((step, i) => (
+                      <div key={i} className="flex items-center gap-2 text-sm">
+                        {step.done ? (
+                          <Check size={14} className="text-green-400 flex-shrink-0" />
+                        ) : (
+                          <div className="animate-spin h-3.5 w-3.5 border-2 border-slate-500 border-t-white rounded-full flex-shrink-0" />
+                        )}
+                        <span className={step.done ? "text-slate-400" : "text-white"}>{step.text}</span>
+                      </div>
+                    ))
+                  )}
                 </div>
 
               </div>
@@ -908,6 +1888,45 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
         <div className="border-t border-slate-800 bg-slate-900 p-6">
 
           <div className="max-w-4xl mx-auto">
+
+            
+            {showLatestDeckCard && currentDecks.length > 0 && (
+              <div className="mb-4 bg-slate-800 border border-slate-700 rounded-2xl p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-bold text-lg">{currentDecks[currentDecks.length - 1].deck.deckTitle}</h3>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => downloadSlideDeck(currentDecks[currentDecks.length - 1])}
+                      className="bg-blue-600 hover:bg-blue-700 rounded-xl px-4 py-2 text-sm font-medium transition"
+                    >
+                      Download PPTX
+                    </button>
+                    <button
+                      onClick={() => setShowLatestDeckCard(false)}
+                      className="text-slate-400 hover:text-white transition p-2"
+                      title="Close"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+                <ol className="text-sm text-slate-300 list-decimal pl-5 space-y-1">
+                  {currentDecks[currentDecks.length - 1].deck.slides.map((s: any, i: number) => (
+                    <li key={i}>{s.title || s.deckTitle} <span className="text-slate-500 text-xs">({s.type})</span></li>
+                  ))}
+                </ol>
+                {currentDecks[currentDecks.length - 1].sources.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-slate-700 text-xs text-slate-500">
+                    Sources: {currentDecks[currentDecks.length - 1].sources.map((s) => s.title).join(", ")}
+                  </div>
+                )}
+                {currentDecks.length > 1 && (
+                  <p className="mt-2 text-xs text-slate-500">
+                    You have {currentDecks.length} decks in this conversation — see the sidebar for all of them.
+                  </p>
+                )}
+              </div>
+            )}
 
             <div className="relative flex items-end gap-3 bg-slate-800 rounded-2xl p-3">
 
@@ -927,7 +1946,7 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
 
       for (const file of files) {
 
-        // PDF Extraction
+      // PDF Extraction
         if (file.type === "application/pdf") {
           try {
             const pdfjsLib = await import("pdfjs-dist");
@@ -957,7 +1976,37 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
             console.log("PDF extracted text length:", text.length);
             console.log("PDF extracted text preview:", text.slice(0, 300));
 
-            setDocumentText((prev) => prev + `\n\n--- ${file.name} ---\n\n` + text);
+            const meaningfulText = text.replace(/\s/g, "");
+
+            if (meaningfulText.length < 20) {
+              console.log("PDF appears to have no real text layer — rendering pages as images instead.");
+
+              const maxPagesToRender = Math.min(pdf.numPages, 5);
+
+              for (let i = 1; i <= maxPagesToRender; i++) {
+                const page = await pdf.getPage(i);
+                const viewport = page.getViewport({ scale: 1.5 });
+
+                const canvas = document.createElement("canvas");
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+                const ctx = canvas.getContext("2d");
+
+                if (ctx) {
+                  await page.render({ canvasContext: ctx, viewport } as any).promise;
+                  const dataUrl = canvas.toDataURL("image/png");
+                  setUploadedImages((prev) => [...prev, dataUrl]);
+                }
+              }
+
+              setDocumentText(
+                (prev) =>
+                  prev +
+                  `\n\n--- ${file.name} ---\n\n(This PDF has no extractable text layer — its pages were converted to images and attached for visual reading instead.)`
+              );
+            } else {
+              setDocumentText((prev) => prev + `\n\n--- ${file.name} ---\n\n` + text);
+            }
           } catch (err) {
             console.error("PDF extraction failed:", err);
           }
@@ -1132,7 +2181,7 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
 
               <button
                 onClick={sendMessage}
-                disabled={loading}
+                disabled={loading || generatingSlides}
                 className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 rounded-xl p-3 transition"
               >
                 <Send size={20} />
@@ -1140,10 +2189,10 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
 
             </div>
 
-            <div className="flex items-center justify-center gap-3 mt-3">
+            <div className="flex items-start justify-between mt-3">
               <button
                 onClick={handleManualSave}
-                className="text-xs text-slate-400 hover:text-white transition flex items-center gap-1"
+                className="text-xs text-slate-400 hover:text-white transition flex items-center gap-1 mt-1"
               >
                 {conversationSaved ? (
                   <>
@@ -1155,16 +2204,37 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
                 )}
               </button>
 
-              <select
-                value={responseMode}
-                onChange={(e) => setResponseMode(e.target.value as "smart" | "deep")}
-                className="text-xs bg-slate-800 text-slate-300 border border-slate-700 rounded-lg px-2 py-1 outline-none hover:border-slate-600 transition cursor-pointer"
-              >
-                <option value="smart">💬 Smart Conversation</option>
-                <option value="deep">🔬 Deep Research</option>
-              </select>
+              <div className="flex items-start gap-3">
+                <select
+                  value={responseMode}
+                  onChange={(e) => setResponseMode(e.target.value as "smart" | "deep")}
+                  className="text-xs bg-slate-800 text-slate-300 border border-slate-700 rounded-lg px-2 py-1 outline-none hover:border-slate-600 transition cursor-pointer"
+                >
+                  <option value="smart">💬 Smart Conversation</option>
+                  <option value="deep">🔬 Deep Research</option>
+                </select>
 
-          
+                <div className="flex flex-col items-center gap-0.5">
+                  <select
+                    value={preferredTheme}
+                    onChange={(e) => setPreferredTheme(e.target.value)}
+                    className="text-xs bg-slate-800 text-slate-300 border border-slate-700 rounded-lg px-2 py-1 outline-none hover:border-slate-600 transition cursor-pointer"
+                    title="Deck theme (used when generating or editing slides)"
+                  >
+                    <option value="auto">🎨 Auto Theme</option>
+                    <option value="blue">🔵 Corporate Blue</option>
+                    <option value="red">🔴 Bold Red</option>
+                    <option value="green">🟢 Fresh Green</option>
+                    <option value="purple">🟣 Modern Purple</option>
+                    <option value="teal">🟦 Tech Teal</option>
+                    <option value="charcoal">⚫ Executive Charcoal & Gold</option>
+                    <option value="slate">🔶 Slate & Orange</option>
+                  </select>
+                  <span className="text-[10px] font-bold text-yellow-500">
+                    Theme for the day
+                  </span>
+                </div>
+              </div>
             </div>
 
 <div className="flex items-center justify-between text-xs text-slate-500 mt-2">

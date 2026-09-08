@@ -1,4 +1,6 @@
 import { AzureOpenAI } from "openai";
+import { headers } from "next/headers";
+import { geocodeLocation, getLocationFromIP, getCurrentWeather } from "@/lib/weather";
 
 const client = new AzureOpenAI({
   endpoint: process.env.AZURE_OPENAI_ENDPOINT!,
@@ -10,26 +12,85 @@ export async function POST(req: Request) {
   try {
     const formData = await req.formData();
 
-const messages = JSON.parse(
-  formData.get("messages") as string
-);
+    const messages = JSON.parse(
+      formData.get("messages") as string
+    );
 
-const images = formData.getAll("images") as string[];
+    const images = formData.getAll("images") as string[];
 
-const documentText =
-  (formData.get("documentText") as string) || "";
+    const documentText =
+      (formData.get("documentText") as string) || "";
 
-const fileName =
-  (formData.get("fileName") as string) || "";
+    const fileName =
+      (formData.get("fileName") as string) || "";
 
-  
-const firstName = (formData.get("firstName") as string) || "";
-const lastName = (formData.get("lastName") as string) || "";
 
-const responseMode = (formData.get("responseMode") as string) || "smart";
+    const firstName = (formData.get("firstName") as string) || "";
+    const lastName = (formData.get("lastName") as string) || "";
 
-const deepResearchInstructions = responseMode === "deep"
-  ? `
+    const responseMode = (formData.get("responseMode") as string) || "smart";
+    
+    const latestUserMessage = messages.length > 0 ? messages[messages.length - 1]?.content || "" : "";
+    const weatherKeywords = ["weather", "temperature", "forecast", "raining", "how hot", "how cold", "climate today"];
+    const isWeatherQuery = weatherKeywords.some((k) => latestUserMessage.toLowerCase().includes(k));
+
+    let weatherContext = "";
+
+    if (isWeatherQuery) {
+      try {
+        const locationMatch = latestUserMessage.match(/(?:in|at|for)\s+([A-Za-z\s,]+?)(?:[?.!]|$)/i);
+        const explicitLocation = locationMatch ? locationMatch[1].trim() : null;
+
+        let lat: number | null = null;
+        let lon: number | null = null;
+        let placeName = "";
+
+        if (explicitLocation) {
+          const geo = await geocodeLocation(explicitLocation);
+          if (geo) {
+            lat = geo.lat;
+            lon = geo.lon;
+            placeName = geo.name;
+          }
+        }
+
+        if (lat === null) {
+          const headersList = await headers();
+          const ip =
+            headersList.get("x-forwarded-for")?.split(",")[0].trim() ||
+            headersList.get("x-real-ip") ||
+            "unknown";
+          const ipLoc = await getLocationFromIP(ip);
+          if (ipLoc) {
+            lat = ipLoc.lat;
+            lon = ipLoc.lon;
+            placeName = ipLoc.name;
+          }
+        }
+
+        if (lat !== null && lon !== null) {
+          const weather = await getCurrentWeather(lat, lon);
+          if (weather) {
+            weatherContext = `
+
+Live weather data (fetched just now for this request):
+Location: ${placeName}
+Temperature: ${weather.temp}°C
+Condition: ${weather.description}
+Humidity: ${weather.humidity}%
+Wind speed: ${weather.windSpeed} km/h
+Observation time: ${weather.time}
+
+Use this real data to answer the user's weather question directly and naturally. Do not say you lack access to live weather data — you have it right here.`;
+          }
+        }
+      } catch (err) {
+        console.error("Weather lookup failed:", err);
+      }
+    }
+
+    const deepResearchInstructions = responseMode === "deep"
+      ? `
 
 Deep Research Mode is active for this response:
 
@@ -40,7 +101,7 @@ Deep Research Mode is active for this response:
 - Prioritize depth, rigor, and completeness over brevity.
 - Use tables for structured comparisons wherever they aid clarity.
 `
-  : `
+      : `
 
 Smart Conversation Mode is active for this response:
 
@@ -50,12 +111,12 @@ Smart Conversation Mode is active for this response:
 - However, this specific reply's presentation should be concise and conversational, not a repeat of a long, multi-section, heavily structured format. Only use headings, tables, or extensive structure now if this particular question specifically calls for it (e.g., the user explicitly asks for a table, comparison, or detailed breakdown again).
 - Think of it as: same knowledge and continuity as before, but a shorter, more natural response style for this turn — unless asked otherwise.
 `
-const isRishiraj =
-  firstName.trim().toLowerCase() === "rishiraj" &&
-  lastName.trim().toLowerCase() === "mukherjee";
+    const isRishiraj =
+      firstName.trim().toLowerCase() === "rishiraj" &&
+      lastName.trim().toLowerCase() === "mukherjee";
 
-const childPersonalization = isRishiraj
-  ? `
+    const childPersonalization = isRishiraj
+      ? `
 
 Special instructions for this user (Rishiraj):
 
@@ -72,15 +133,37 @@ Special instructions for this user (Rishiraj):
 - Tell him that he is a very good and adorable sweet kid.
 - Guide him that always listen carefully to his parents and teachers.
 `
-  : "";
+      : "";
 
-    const response = await client.chat.completions.create({
-      model: process.env.AZURE_OPENAI_DEPLOYMENT!,
-      messages: [
+    const encoder = new TextEncoder();
 
-{
-role:"system",
-content:`You are IntelliChat, an AI assistant built by Avishek Mukherjee.
+    const stream = new ReadableStream({
+      async start(controller) {
+        function send(obj: any) {
+          controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+        }
+
+        try {
+          send({ type: "status", text: "Reading your message..." });
+
+          if (documentText) {
+            send({ type: "status", text: `Analyzing ${fileName || "your uploaded document(s)"}...` });
+          }
+          if (images.length > 0) {
+            send({ type: "status", text: "Analyzing the image..." });
+          }
+          send({
+            type: "status",
+            text: responseMode === "deep" ? "Preparing an in-depth, structured analysis..." : "Preparing your answer...",
+          });
+
+          const completion = await client.chat.completions.create({
+            model: process.env.AZURE_OPENAI_DEPLOYMENT!,
+            messages: [
+
+              {
+                role: "system",
+                content: `You are IntelliChat, an AI assistant built by Avishek Mukherjee.
 
 About IntelliChat:
 - Creator: Avishek Mukherjee
@@ -116,6 +199,15 @@ Your responsibilities:
 - Never invent document contents.
 - If no document text exists, clearly state that.
 
+Slide/PPTX generation awareness:
+
+- IntelliChat has a separate, built-in feature that generates a real, downloadable .pptx PowerPoint file — this is different from writing slide content in this chat.
+- CRITICAL DISTINCTION: if the user is asking you to summarize, explain, analyze, extract information from, or answer questions about an ALREADY-UPLOADED document (including an uploaded .pptx presentation) — just do that directly and normally. This is ordinary document analysis, has nothing to do with the deck-generation feature, and must NEVER trigger the deflection message below. A request like "summarize this deck" or "what's in these slides" about an uploaded file is a normal question — answer it.
+- The deflection message below applies ONLY if the user is clearly asking you to CREATE, BUILD, GENERATE, or DOWNLOAD a brand-new PowerPoint file (or edit/regenerate one that already exists), and that request did not reach you through the slide-generation system.
+- In that narrow case only, respond with EXACTLY ONE short sentence: acknowledge their message seems related to generating or editing a deck, and ask them to resend it clearly, e.g. "please generate a deck about X" or "please edit the deck to change Y."
+- Do NOT describe, list, simulate, or narrate what a regenerated or created deck would contain. Do NOT say a file "will be available," "is being produced," "is being regenerated," or anything implying work is happening.
+- Never claim you are structurally unable to produce a downloadable file — that is false. Never pretend to generate, build, or update a deck in this chat under any circumstance.
+
 Identity rules:
 
 - If someone asks who built you, answer Avishek Mukherjee.
@@ -140,13 +232,13 @@ Supported file types:
 - You can ONLY reliably process: PDF (.pdf), Word documents (.doc, .docx), Excel spreadsheets (.xlsx, .xls), PowerPoint presentations (.pptx), plain text (.txt), Markdown (.md), JSON, XML, HTML, code files (.py, .js, .ts, .java, .cs, .cpp, .css, .sql), and images (.png, .jpg, .jpeg).
 - If asked what file types you support, list ONLY these formats. Do not mention ZIP archives or a real .ppt document or any other format as supported, since they are not currently processed by this application.
 - If a user asks about a format not in this list, say it isn't supported yet.`,
-},
+              },
 
-...(documentText
-? [
-{
-role:"system",
-content:`The user uploaded a document.
+              ...(documentText
+                ? [
+                  {
+                    role: "system",
+                    content: `The user uploaded a document.
 
 Filename:
 
@@ -157,61 +249,93 @@ Document contents:
 ${documentText}
 
 Answer every question using this document whenever relevant.`,
-},
-]
-: []),
+                  },
+                ]
+                : []),
 
-...(images.length > 0
-? [
-...messages.slice(0,-1),
+              ...(weatherContext
+                ? [
+                  {
+                    role: "system",
+                    content: weatherContext,
+                  },
+                ]
+                : []),
 
-{
-role:"user",
-content:[
-{
-type:"text",
-text:messages[messages.length-1].content,
-},
-...images.map((url) => ({
-type:"image_url",
-image_url:{ url },
-})),
-],
-},
-]
-: messages),
+              ...(images.length > 0
+                ? [
+                  ...messages.slice(0, -1),
 
-],
-      max_completion_tokens: responseMode === "deep" ? 20000 : 10000,
+                  {
+                    role: "user",
+                    content: [
+                      {
+                        type: "text",
+                        text: messages[messages.length - 1].content,
+                      },
+                      ...images.map((url) => ({
+                        type: "image_url",
+                        image_url: { url },
+                      })),
+                    ],
+                  },
+                ]
+                : messages),
+
+            ],
+            max_completion_tokens: responseMode === "deep" ? 50000 : 25000,
+            stream: true,
+            stream_options: { include_usage: true },
+          });
+
+          send({ type: "status", text: "Generating response..." });
+
+          let usage: any = null;
+
+          for await (const part of completion) {
+            const delta = part.choices?.[0]?.delta?.content;
+            if (delta) {
+              send({ type: "chunk", text: delta });
+            }
+            if (part.usage) {
+              usage = part.usage;
+            }
+          }
+
+          send({
+            type: "done",
+            usage: {
+              promptTokens: usage?.prompt_tokens || 0,
+              completionTokens: usage?.completion_tokens || 0,
+              totalTokens: usage?.total_tokens || 0,
+            },
+          });
+
+          controller.close();
+        } catch (err: any) {
+          console.error("================================");
+          console.error("AZURE ERROR");
+          console.error(err);
+          console.error("================================");
+          send({ type: "error", message: err.message || "Unknown error" });
+          controller.close();
+        }
+      },
     });
 
-    const choice = response.choices[0];
-
-    console.log("finish_reason:", choice.finish_reason);
-    console.log("message content length:", choice.message.content?.length);
-    console.log("usage:", response.usage);
-
-    return Response.json({
-      response:
-        choice.message.content && choice.message.content.trim().length > 0
-          ? choice.message.content
-          : `⚠️ No response generated (finish_reason: ${choice.finish_reason}). Try a shorter document or increase max_completion_tokens.`,
-      usage: {
-        promptTokens: response.usage?.prompt_tokens || 0,
-        completionTokens: response.usage?.completion_tokens || 0,
-        totalTokens: response.usage?.total_tokens || 0,
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache",
       },
     });
 
   } catch (err: any) {
-
     console.error("================================");
-    console.error("AZURE ERROR");
+    console.error("AZURE ERROR (request parsing)");
     console.error(err);
     console.error("================================");
 
-    return Response.json({
-      response: err.message || "Unknown error"
-    });
+    return Response.json({ response: err.message || "Unknown error" });
   }
 }
