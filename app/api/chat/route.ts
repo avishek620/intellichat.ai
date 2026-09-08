@@ -30,29 +30,43 @@ export async function POST(req: Request) {
 
     const responseMode = (formData.get("responseMode") as string) || "smart";
     
-    const latestUserMessage = messages.length > 0 ? messages[messages.length - 1]?.content || "" : "";
-    const weatherKeywords = ["weather", "temperature", "forecast", "raining", "how hot", "how cold", "climate today"];
-    const isWeatherQuery = weatherKeywords.some((k) => latestUserMessage.toLowerCase().includes(k));
+    const recentMessages = messages.slice(-6);
+    const conversationSnippet = recentMessages
+      .map((m: any) => `${m.role}: ${m.content}`)
+      .join("\n");
 
     let weatherContext = "";
 
-    console.log("WEATHER DEBUG — latestUserMessage:", latestUserMessage);
-    console.log("WEATHER DEBUG — isWeatherQuery:", isWeatherQuery);
+    try {
+      const classifyResponse = await client.chat.completions.create({
+        model: process.env.AZURE_OPENAI_DEPLOYMENT!,
+        messages: [
+          {
+            role: "system",
+            content: `Look at this conversation and decide if the user's LATEST message is asking about current weather, temperature, or conditions at some location — including short follow-ups like "what about X", a bare place name reply to a clarifying question, or "how about now".
 
-    if (isWeatherQuery) {
-      try {
-        const trailingWords = /\s+(today|now|currently|right now|tonight|this morning|this evening|this afternoon)\s*[?.!]*\s*$/i;
-        const locationMatch = latestUserMessage.match(/(?:in|at|for)\s+([A-Za-z\s,]+?)(?:[?.!]|$)/i);
-        const explicitLocation = locationMatch
-          ? locationMatch[1].trim().replace(trailingWords, "").trim()
-          : null;
+Respond with ONLY valid JSON, no markdown, no commentary:
+{ "isWeatherQuery": true or false, "location": "string or null" }
 
+- "location": the specific place being asked about, resolved from context if needed (e.g. if the user just replied "Dallas" to a clarifying question about which Texas city, location is "Dallas"). Use null if no specific place was named or implied — meaning the user's OWN current location should be used instead.
+- If the latest message is clearly unrelated to weather, return { "isWeatherQuery": false, "location": null }.`,
+          },
+          { role: "user", content: conversationSnippet },
+        ],
+        max_completion_tokens: 100,
+      });
+
+      const raw = classifyResponse.choices[0].message.content || "{}";
+      const cleaned = raw.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(cleaned);
+
+      if (parsed.isWeatherQuery) {
         let lat: number | null = null;
         let lon: number | null = null;
         let placeName = "";
 
-        if (explicitLocation) {
-          const geo = await geocodeLocation(explicitLocation);
+        if (parsed.location) {
+          const geo = await geocodeLocation(parsed.location);
           if (geo) {
             lat = geo.lat;
             lon = geo.lon;
@@ -74,8 +88,6 @@ export async function POST(req: Request) {
           }
         }
 
-    console.log("WEATHER DEBUG — explicitLocation:", explicitLocation, "| lat:", lat, "| lon:", lon, "| placeName:", placeName);
-
         if (lat !== null && lon !== null) {
           const weather = await getCurrentWeather(lat, lon);
           if (weather) {
@@ -92,9 +104,9 @@ Observation time: ${weather.time}
 Use this real data to answer the user's weather question directly and naturally. Do not say you lack access to live weather data — you have it right here.`;
           }
         }
-      } catch (err) {
-        console.error("Weather lookup failed:", err);
       }
+    } catch (err) {
+      console.error("Weather classification/lookup failed:", err);
     }
 
     const deepResearchInstructions = responseMode === "deep"
