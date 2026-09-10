@@ -46,13 +46,20 @@ export interface WeatherResult {
 
 export async function geocodeLocation(query: string): Promise<GeoResult | null> {
   try {
+    console.log("geocodeLocation called with query:", query);
+
     const res = await fetch(
       `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=1`
     );
+    console.log("geocoding response status:", res.status);
     if (!res.ok) return null;
     const data = await res.json();
+    console.log("geocoding response data:", JSON.stringify(data));
     const result = data.results?.[0];
-    if (!result) return null;
+    if (!result) {
+      console.log("geocodeLocation: no results found for query");
+      return null;
+    }
     return {
       name: `${result.name}${result.admin1 ? ", " + result.admin1 : ""}${result.country ? ", " + result.country : ""}`,
       lat: result.latitude,
@@ -67,11 +74,18 @@ export async function geocodeLocation(query: string): Promise<GeoResult | null> 
 
 export async function getLocationFromIP(ip: string): Promise<GeoResult | null> {
   try {
-    if (!ip || ip === "unknown" || ip === "127.0.0.1" || ip === "::1") return null;
+    console.log("getLocationFromIP called with ip:", ip);
+
+    if (!ip || ip === "unknown" || ip === "127.0.0.1" || ip === "::1") {
+      console.log("getLocationFromIP: ip rejected as invalid");
+      return null;
+    }
 
     const res = await fetch(`https://ipapi.co/${ip}/json/`);
+    console.log("ipapi.co response status:", res.status);
     if (!res.ok) return null;
     const data = await res.json();
+    console.log("ipapi.co response data:", JSON.stringify(data));
     if (data.error || !data.latitude) return null;
 
     return {
@@ -88,11 +102,15 @@ export async function getLocationFromIP(ip: string): Promise<GeoResult | null> {
 
 export async function getCurrentWeather(lat: number, lon: number): Promise<WeatherResult | null> {
   try {
+    console.log("getCurrentWeather called with lat/lon:", lat, lon);
+
     const res = await fetch(
       `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&timezone=auto`
     );
+    console.log("open-meteo weather response status:", res.status);
     if (!res.ok) return null;
     const data = await res.json();
+    console.log("open-meteo weather response data:", JSON.stringify(data));
     const c = data.current;
     if (!c) return null;
 
