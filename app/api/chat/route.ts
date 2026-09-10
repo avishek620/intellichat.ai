@@ -1,6 +1,7 @@
 import { AzureOpenAI } from "openai";
 import { headers } from "next/headers";
 import { geocodeLocation, getCurrentWeather } from "@/lib/weather";
+import { performWebSearch } from "@/lib/webSearch";
 
 const client = new AzureOpenAI({
   endpoint: process.env.AZURE_OPENAI_ENDPOINT!,
@@ -143,6 +144,55 @@ Use this to answer the user's location question directly and naturally. Note it'
       console.error("Weather classification/lookup failed:", err);
     }
 
+    
+    let searchContext = "";
+
+    try {
+      const searchClassify = await client.chat.completions.create({
+        model: process.env.AZURE_OPENAI_DEPLOYMENT!,
+        messages: [
+          {
+            role: "system",
+            content: `Look at this conversation and decide if answering the user's LATEST message accurately requires current, real-time, or recent information from the web — things like current events, schedules, scores, prices, news, recent releases, or anything that changes over time and could be outdated in the model's training data.
+
+Respond with ONLY valid JSON, no markdown, no commentary:
+{ "needsSearch": true or false, "query": "string or null" }
+
+- "needsSearch": true only if genuinely current/live information is needed. False for general knowledge, coding help, explanations, creative writing, or anything timeless.
+- "query": a short, specific search query (a few words) that would find the needed information. Null if needsSearch is false.`,
+          },
+          { role: "user", content: conversationSnippet },
+        ],
+        max_completion_tokens: 300,
+      });
+
+      const rawSearch = searchClassify.choices[0].message.content || "{}";
+      const cleanedSearch = rawSearch.replace(/```json|```/g, "").trim();
+
+      let parsedSearch: any = { needsSearch: false, query: null };
+      try {
+        parsedSearch = JSON.parse(cleanedSearch);
+      } catch (parseErr) {
+        console.error("Search classifier JSON parse failed:", rawSearch);
+      }
+
+      if (parsedSearch.needsSearch && parsedSearch.query) {
+        const results = await performWebSearch(parsedSearch.query, 5);
+
+        if (results.length > 0) {
+          searchContext = `
+
+Live web search results (fetched just now for this request, query: "${parsedSearch.query}"):
+
+${results.map((r) => `Source: ${r.title} (${r.url})\n${r.content}`).join("\n\n---\n\n")}
+
+Use these real, current search results to answer the user's question accurately. Cite sources naturally where relevant. If the results don't fully answer the question, say so honestly rather than guessing — but do not claim you lack web access, since you have these live results right here.`;
+        }
+      }
+    } catch (err) {
+      console.error("Search classification/lookup failed:", err);
+    }
+
     const deepResearchInstructions = responseMode === "deep"
       ? `
 
@@ -210,6 +260,10 @@ Special instructions for this user (Rishiraj):
             type: "status",
             text: responseMode === "deep" ? "Preparing an in-depth, structured analysis..." : "Preparing your answer...",
           });
+
+          if (searchContext) {
+            send({ type: "status", text: "Searching the web for current information..." });
+          }
 
           const completion = await client.chat.completions.create({
             model: process.env.AZURE_OPENAI_DEPLOYMENT!,
@@ -312,6 +366,15 @@ Answer every question using this document whenever relevant.`,
                   {
                     role: "system",
                     content: weatherContext,
+                  },
+                ]
+                : []),
+
+              ...(searchContext
+                ? [
+                  {
+                    role: "system",
+                    content: searchContext,
                   },
                 ]
                 : []),
