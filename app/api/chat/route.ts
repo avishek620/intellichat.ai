@@ -1,6 +1,6 @@
 import { AzureOpenAI } from "openai";
 import { headers } from "next/headers";
-import { geocodeLocation, getLocationFromIP, getCurrentWeather } from "@/lib/weather";
+import { geocodeLocation, getCurrentWeather } from "@/lib/weather";
 
 const client = new AzureOpenAI({
   endpoint: process.env.AZURE_OPENAI_ENDPOINT!,
@@ -90,17 +90,27 @@ Respond with ONLY valid JSON, no markdown, no commentary:
 
         if (lat === null) {
           const headersList = await headers();
-          const ip =
-            headersList.get("x-forwarded-for")?.split(",")[0].trim() ||
-            headersList.get("x-real-ip") ||
-            "unknown";
-          const ipLoc = await getLocationFromIP(ip);
-          if (ipLoc) {
-            lat = ipLoc.lat;
-            lon = ipLoc.lon;
-            placeName = ipLoc.name;
+
+          const vLat = headersList.get("x-vercel-ip-latitude");
+          const vLon = headersList.get("x-vercel-ip-longitude");
+          const vCity = headersList.get("x-vercel-ip-city");
+          const vRegion = headersList.get("x-vercel-ip-country-region");
+          const vCountry = headersList.get("x-vercel-ip-country");
+
+          if (vLat && vLon) {
+            lat = parseFloat(vLat);
+            lon = parseFloat(vLon);
+            placeName = [
+              vCity ? decodeURIComponent(vCity) : null,
+              vRegion,
+              vCountry,
+            ]
+              .filter(Boolean)
+              .join(", ");
             usedIP = true;
           }
+
+          console.log("Vercel geolocation headers:", { vLat, vLon, vCity, vRegion, vCountry });
         }
 
         if (lat !== null && lon !== null) {

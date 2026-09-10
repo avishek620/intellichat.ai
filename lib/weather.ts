@@ -45,31 +45,43 @@ export interface WeatherResult {
 }
 
 export async function geocodeLocation(query: string): Promise<GeoResult | null> {
-  try {
-    console.log("geocodeLocation called with query:", query);
+  async function tryGeocode(q: string): Promise<GeoResult | null> {
+    try {
+      console.log("geocodeLocation trying query:", q);
 
-    const res = await fetch(
-      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=1`
-    );
-    console.log("geocoding response status:", res.status);
-    if (!res.ok) return null;
-    const data = await res.json();
-    console.log("geocoding response data:", JSON.stringify(data));
-    const result = data.results?.[0];
-    if (!result) {
-      console.log("geocodeLocation: no results found for query");
+      const res = await fetch(
+        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=1`
+      );
+      if (!res.ok) return null;
+      const data = await res.json();
+      const result = data.results?.[0];
+      if (!result) return null;
+
+      return {
+        name: `${result.name}${result.admin1 ? ", " + result.admin1 : ""}${result.country ? ", " + result.country : ""}`,
+        lat: result.latitude,
+        lon: result.longitude,
+        country: result.country,
+      };
+    } catch (err) {
+      console.error("Geocoding attempt failed:", err);
       return null;
     }
-    return {
-      name: `${result.name}${result.admin1 ? ", " + result.admin1 : ""}${result.country ? ", " + result.country : ""}`,
-      lat: result.latitude,
-      lon: result.longitude,
-      country: result.country,
-    };
-  } catch (err) {
-    console.error("Geocoding failed:", err);
-    return null;
   }
+
+  const directResult = await tryGeocode(query);
+  if (directResult) return directResult;
+
+  const parts = query.split(",").map((p) => p.trim()).filter(Boolean);
+  if (parts.length > 1) {
+    const broaderQuery = parts.slice(1).join(", ");
+    console.log("geocodeLocation: direct query failed, trying broader:", broaderQuery);
+    const broaderResult = await tryGeocode(broaderQuery);
+    if (broaderResult) return broaderResult;
+  }
+
+  console.log("geocodeLocation: no results found even with fallback");
+  return null;
 }
 
 export async function getLocationFromIP(ip: string): Promise<GeoResult | null> {
