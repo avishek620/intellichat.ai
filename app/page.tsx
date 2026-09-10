@@ -657,7 +657,7 @@ setLoading(true);
       clearSteps(setChatSteps);
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: "⚠️ Unable to connect to Azure OpenAI." },
+        { role: "assistant", content: "⚠️ Unable to connect to the private model Clarion-1.1 right now. Please check your internet connection and try again." },
       ]);
     }
 
