@@ -23,11 +23,23 @@ interface Message {
   content: string;
   responseTime?: number;
   streaming?: boolean;
+  agentReportId?: string;
 }
 
 interface SlideDeckRecord {
   id: string;
   deck: any;
+  sources: { title: string; url: string }[];
+  createdAt: number;
+}
+
+interface AgentReportRecord {
+  id: string;
+  agentType: "challenge" | "discover";
+  agentLabel: string;
+  title: string;
+  report: string;
+  summary: string;
   sources: { title: string; url: string }[];
   createdAt: number;
 }
@@ -41,6 +53,7 @@ interface Conversation {
   documentText?: string;
   uploadedFileNames?: string[];
   uploadedImages?: string[];
+  agentReports?: AgentReportRecord[];
 }
 
 function MessageContent({ content }: { content: string }) {
@@ -141,6 +154,13 @@ export default function Home() {
 
 
   const [currentDecks, setCurrentDecks] = useState<SlideDeckRecord[]>([]);
+
+  const [currentAgentReports, setCurrentAgentReports] = useState<AgentReportRecord[]>([]);
+  const [generatingAgent, setGeneratingAgent] = useState(false);
+  const [agentStepsList, setAgentStepsList] = useState<{ text: string; done: boolean }[]>([]);
+  const [agentReportsListOpen, setAgentReportsListOpen] = useState(false);
+  const [selectedAgent, setSelectedAgent] = useState<"" | "challenge" | "discover">("");
+
   const [generatingSlides, setGeneratingSlides] = useState(false);
   const [showLatestDeckCard, setShowLatestDeckCard] = useState(false);
   const [decksListOpen, setDecksListOpen] = useState(false);
@@ -160,6 +180,21 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const hasHydrated = useRef(false);
+
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  function stopGeneration() {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    clearSteps(setChatSteps);
+    setSlideStepsList([]);
+    setAgentStepsList([]);
+    setLoading(false);
+    setGeneratingSlides(false);
+    setGeneratingAgent(false);
+  }
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
@@ -395,17 +430,15 @@ function formatTime(ms: number) {
 
   function saveCurrentConversation() {
     const realMessages = messages.filter((m, i) => !(i === 0 && m.role === "assistant"));
-    if (realMessages.length === 0 && currentDecks.length === 0) return;
+    if (realMessages.length === 0 && currentDecks.length === 0 && currentAgentReports.length === 0) return;
     persistConversationState();
   }
 
-  function persistConversationState(decksOverride?: SlideDeckRecord[]) {
+  function persistConversationState(decksOverride?: SlideDeckRecord[], agentReportsOverride?: AgentReportRecord[]) {
     const id = activeConversationId || Date.now().toString();
 
     const firstUserMessage = messages.find((m) => m.role === "user");
-    const title = firstUserMessage
-      ? firstUserMessage.content.slice(0, 40)
-      : "Untitled chat";
+    const title = firstUserMessage ? firstUserMessage.content.slice(0, 40) : "Untitled chat";
 
     setConversations((prev) => {
       const existingIndex = prev.findIndex((c) => c.id === id);
@@ -415,6 +448,7 @@ function formatTime(ms: number) {
         messages,
         timestamp: Date.now(),
         decks: decksOverride ?? currentDecks,
+        agentReports: agentReportsOverride ?? currentAgentReports,
         documentText,
         uploadedFileNames,
         uploadedImages,
@@ -453,6 +487,8 @@ function formatTime(ms: number) {
     setUploadedImages(conv.uploadedImages || []);
     setUploadedFiles([]);
     setShowLatestDeckCard(false);
+    setCurrentAgentReports(conv.agentReports || []);
+    setSelectedAgent("");
   }
 
   function deleteConversation(id: string, e: React.MouseEvent) {
@@ -468,7 +504,7 @@ function formatTime(ms: number) {
   }
 
 
-        function detectSlideIntentHeuristic(text: string, hasDeck: boolean): "create" | "edit" | null {
+  function detectSlideIntentHeuristic(text: string, hasDeck: boolean): "create" | "edit" | null {
     const lower = text.toLowerCase();
 
     const deckNouns = ["slide", "slides", "deck", "presentation", "pptx", "ppt", "powerpoint"];
@@ -493,7 +529,18 @@ function formatTime(ms: number) {
 
    async function sendMessage() {
     if (!prompt.trim()) return;
-    if (loading || generatingSlides) return;
+
+    if (loading || generatingSlides || generatingAgent) return;
+
+    if (selectedAgent) {
+      const userMessage: Message = { role: "user", content: prompt };
+      setMessages((prev) => [...prev, userMessage]);
+      const instructions = prompt;
+      const agentToRun = selectedAgent;
+      setPrompt("");
+      await runAgentRequest(agentToRun, instructions);
+      return;
+    }
 
     let intent: "create" | "edit" | "none" = "none";
 
@@ -517,7 +564,7 @@ function formatTime(ms: number) {
 
     console.log("Detected slide intent:", intent, "| heuristic hit:", !!heuristicIntent);
 
-        if (intent === "create" || (intent === "edit" && currentDecks.length > 0)) {
+    if (intent === "create" || (intent === "edit" && currentDecks.length > 0)) {
       const userMessage: Message = { role: "user", content: prompt };
       setMessages((prev) => [...prev, userMessage]);
       const instructions = prompt;
@@ -567,9 +614,13 @@ setLoading(true);
 
       const startTime = Date.now();
 
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
       const res = await fetch("/api/chat", {
         method: "POST",
         body: formData,
+        signal: controller.signal,
       });
 
       if (!res.body) throw new Error("No response stream");
@@ -653,14 +704,17 @@ setLoading(true);
           }
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       clearSteps(setChatSteps);
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: "⚠️ Unable to connect to the private model Clarion-1.1 right now. Please check your internet connection and try again." },
-      ]);
+      if (err.name !== "AbortError") {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "⚠️ Unable to connect right now. Please check your internet connection and try again." },
+        ]);
+      }
     }
 
+    abortControllerRef.current = null;
     clearSteps(setChatSteps);
     setLoading(false);
   }
@@ -782,6 +836,9 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
 
     const existingDeckForEdit = currentDecks.length > 0 ? currentDecks[currentDecks.length - 1].deck : undefined;
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     try {
       const res = await fetch("/api/generate-slides", {
         method: "POST",
@@ -794,6 +851,7 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
           preferredTheme,
           existingDeck: mode === "edit" ? existingDeckForEdit : undefined,
         }),
+        signal: controller.signal,
       });
 
       if (!res.body) throw new Error("No response stream");
@@ -871,12 +929,115 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
       } else {
         setMessages((prev) => [...prev, { role: "assistant", content: `⚠️ ${errorMsg || "Slide generation failed."}` }]);
       }
-    } catch (err) {
-      setMessages((prev) => [...prev, { role: "assistant", content: "⚠️ Failed to process slide request." }]);
+    } catch (err: any) {
+      if (err.name !== "AbortError") {
+        setMessages((prev) => [...prev, { role: "assistant", content: "⚠️ Failed to process slide request." }]);
+      }
     }
 
+    abortControllerRef.current = null;
     setSlideStepsList([]);
     setGeneratingSlides(false);
+  }
+
+
+  async function runAgentRequest(agentType: "challenge" | "discover", instructions: string) {
+    setGeneratingAgent(true);
+    setAgentStepsList([{ text: "Starting...", done: false }]);
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    try {
+      const res = await fetch("/api/run-agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentType, input: instructions, documentText }),
+        signal: controller.signal,
+      });
+
+      if (!res.body) throw new Error("No response stream");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalResult: any = null;
+      let errorMsg: string | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("STATUS:")) {
+            pushStep(setAgentStepsList, line.slice(7));
+          } else if (line.startsWith("RESULT:")) {
+            finalResult = JSON.parse(line.slice(7));
+          } else if (line.startsWith("ERROR:")) {
+            errorMsg = line.slice(6);
+          }
+        }
+      }
+
+      if (finalResult?.report) {
+        const reportId = Date.now().toString() + Math.random().toString(36).slice(2, 7);
+
+        const newRecord: AgentReportRecord = {
+          id: reportId,
+          agentType: finalResult.agentType,
+          agentLabel: finalResult.agentLabel,
+          title: finalResult.title,
+          report: finalResult.report,
+          summary: finalResult.summary,
+          sources: finalResult.sources || [],
+          createdAt: Date.now(),
+        };
+
+        const updatedReports = [...currentAgentReports, newRecord];
+        setCurrentAgentReports(updatedReports);
+        persistConversationState(undefined, updatedReports);
+
+        if (finalResult.usage) {
+          setTotalInputTokens((prev) => {
+            const updatedVal = prev + (finalResult.usage.promptTokens || 0);
+            sessionStorage.setItem("intellichat-input-tokens", updatedVal.toString());
+            return updatedVal;
+          });
+          setTotalOutputTokens((prev) => {
+            const updatedVal = prev + (finalResult.usage.completionTokens || 0);
+            sessionStorage.setItem("intellichat-output-tokens", updatedVal.toString());
+            return updatedVal;
+          });
+        }
+
+        setTimeout(() => {
+          messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        }, 100);
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `✅ **${finalResult.title}**\n\n${finalResult.summary}\n\n${finalResult.sources.length} sources researched. Download the full report below for the complete analysis and bibliography.`,
+            agentReportId: reportId,
+          },
+        ]);
+      } else {
+        setMessages((prev) => [...prev, { role: "assistant", content: `⚠️ ${errorMsg || "Agent run failed."}` }]);
+      }
+    } catch (err: any) {
+      if (err.name !== "AbortError") {
+        setMessages((prev) => [...prev, { role: "assistant", content: "⚠️ Failed to run the agent." }]);
+      }
+    }
+
+    abortControllerRef.current = null;
+    setAgentStepsList([]);
+    setGeneratingAgent(false);
   }
 
   async function downloadSlideDeck(deckRecord: SlideDeckRecord) {
@@ -1456,6 +1617,19 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
     await pres.writeFile({ fileName: `${deck.deckTitle || "presentation"}.pptx` });
   }
 
+  async function downloadAgentReport(record: AgentReportRecord) {
+    const { exportReportToDocx } = await import("@/lib/exportDocx");
+    const blob = await exportReportToDocx(record.title, record.report, record.agentLabel, record.sources);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${record.title.replace(/[^a-z0-9]/gi, "_")}.docx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
 
   return (
     <div className="flex h-screen bg-slate-950 text-white">
@@ -1505,7 +1679,7 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
             </p>
 
             <input
-              type="text"
+              type="password"
               placeholder="Goodwill code"
               value={goodwillCode}
               onChange={(e) => setGoodwillCode(e.target.value)}
@@ -1567,6 +1741,8 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
     ]);
 
     setActiveConversationId(null);
+    setCurrentAgentReports([]);
+    setSelectedAgent("");
     sessionStorage.removeItem("intellichat-current-messages");
     sessionStorage.removeItem("intellichat-current-active-id");
     sessionStorage.removeItem("intellichat-current-document-text");
@@ -1648,6 +1824,34 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
                       className="w-full bg-blue-600 hover:bg-blue-700 rounded-md py-1.5 text-[11px] font-medium transition"
                     >
                       Download PPTX
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {sidebarOpen && currentAgentReports.length > 0 && (
+          <div className="p-4 border-t border-slate-800 text-xs text-slate-300">
+            <button
+              onClick={() => setAgentReportsListOpen(!agentReportsListOpen)}
+              className="w-full flex items-center justify-between text-slate-500 uppercase text-[10px] mb-2 hover:text-slate-300 transition"
+            >
+              <span>Research Reports ({currentAgentReports.length})</span>
+              <span>{agentReportsListOpen ? "▲" : "▼"}</span>
+            </button>
+
+            {agentReportsListOpen && (
+              <div className="space-y-2 max-h-56 overflow-y-auto">
+                {currentAgentReports.map((record) => (
+                  <div key={record.id} className="bg-slate-800 rounded-lg p-2 space-y-1">
+                    <p className="font-medium truncate text-[11px]">{record.title}</p>
+                    <button
+                      onClick={() => downloadAgentReport(record)}
+                      className="w-full bg-blue-600 hover:bg-blue-700 rounded-md py-1.5 text-[11px] font-medium transition"
+                    >
+                      Download .docx
                     </button>
                   </div>
                 ))}
@@ -1794,6 +1998,21 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
 
   )}
 
+    {msg.role === "assistant" && msg.agentReportId && (
+
+    <button
+      onClick={() => {
+        const record = currentAgentReports.find((r) => r.id === msg.agentReportId);
+        if (record) downloadAgentReport(record);
+      }}
+      className="mt-3 bg-blue-600 hover:bg-blue-700 rounded-xl px-4 py-2 text-sm font-medium transition inline-flex items-center gap-2"
+    >
+      <Download size={16} />
+      Download Full Report (.docx)
+    </button>
+
+  )}
+
   <MessageContent content={msg.content} />
 
   {msg.role === "assistant" && msg.responseTime !== undefined && (
@@ -1876,6 +2095,33 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
 
               </div>
 
+            )}
+
+            {generatingAgent && (
+              <div className="flex gap-4">
+                <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center">
+                  <Bot size={20} />
+                </div>
+                <div className="bg-slate-800 rounded-2xl px-5 py-4 space-y-1.5 min-w-[280px]">
+                  {agentStepsList.length === 0 ? (
+                    <div className="flex items-center gap-2 text-sm">
+                      <div className="animate-spin h-3.5 w-3.5 border-2 border-slate-500 border-t-white rounded-full" />
+                      <span>Running research agent...</span>
+                    </div>
+                  ) : (
+                    agentStepsList.map((step, i) => (
+                      <div key={i} className="flex items-center gap-2 text-sm">
+                        {step.done ? (
+                          <Check size={14} className="text-green-400 flex-shrink-0" />
+                        ) : (
+                          <div className="animate-spin h-3.5 w-3.5 border-2 border-slate-500 border-t-white rounded-full flex-shrink-0" />
+                        )}
+                        <span className={step.done ? "text-slate-400" : "text-white"}>{step.text}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             )}
 
             <div ref={messagesEndRef} />
@@ -2172,20 +2418,32 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
                 onPaste={handlePaste}
                 rows={1}
                 placeholder={
-  uploadedFileNames.length > 0
+  selectedAgent
+    ? "Type your position, objective, or question for the agent..."
+    : uploadedFileNames.length > 0
     ? "Ask anything about this document..."
     : "Ask anything..."
 }
                 className="flex-1 bg-transparent resize-none outline-none text-white placeholder:text-slate-400 max-h-40"
               />
 
-              <button
-                onClick={sendMessage}
-                disabled={loading || generatingSlides}
-                className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 rounded-xl p-3 transition"
-              >
-                <Send size={20} />
-              </button>
+              {(loading || generatingSlides || generatingAgent) ? (
+                <button
+                  onClick={stopGeneration}
+                  className="bg-red-600 hover:bg-red-700 rounded-xl p-3 transition"
+                  title="Stop generating"
+                >
+                  <div className="w-5 h-5 bg-white rounded-sm" />
+                </button>
+              ) : (
+                <button
+                  onClick={sendMessage}
+                  disabled={!prompt.trim()}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 rounded-xl p-3 transition"
+                >
+                  <Send size={20} />
+                </button>
+              )}
 
             </div>
 
@@ -2234,6 +2492,22 @@ function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
                     Theme for the day
                   </span>
                 </div>
+
+                <div className="flex flex-col items-center gap-0.5">
+                  <select
+                    value={selectedAgent}
+                    onChange={(e) => setSelectedAgent(e.target.value as "" | "challenge" | "discover")}
+                    className="text-xs bg-slate-800 text-slate-300 border border-slate-700 rounded-lg px-2 py-1 outline-none hover:border-slate-600 transition cursor-pointer"
+                  >
+                    <option value="">🧭 Select Your Agent</option>
+                    <option value="challenge">🥊 Challenge My Thinking</option>
+                    <option value="discover">🔭 Find Everything I Need to Know</option>
+                  </select>
+                  <span className="text-[10px] font-bold text-yellow-500">
+                    Pre-built Agents
+                  </span>
+                </div>
+
               </div>
             </div>
 
