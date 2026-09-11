@@ -99,9 +99,13 @@ export async function exportReportToDocx(
     children.push(new Paragraph({ text: "Bibliography and Research Sources", heading: HeadingLevel.HEADING_1, spacing: { before: 200, after: 150 } }));
     children.push(
       new Paragraph({
-        text: "The following sources were retrieved and used as the evidentiary basis for this report. Numbering corresponds to the [Source N] references used throughout.",
-        italics: true,
         spacing: { after: 200 },
+        children: [
+          new TextRun({
+            text: "The following sources were retrieved and used as the evidentiary basis for this report. Numbering corresponds to the [Source N] references used throughout.",
+            italics: true,
+          }),
+        ],
       })
     );
 
